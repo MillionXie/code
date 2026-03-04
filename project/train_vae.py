@@ -17,7 +17,7 @@ from utils.viz import save_image_grid, save_reconstruction_comparison
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train ConvVAE on MNIST/CIFAR-10")
-    parser.add_argument("--dataset", type=str, choices=["mnist", "cifar10"], required=True)
+    parser.add_argument("--dataset", type=str, choices=["mnist", "cifar10"], default="mnist")
     parser.add_argument("--latent_dim", type=int, default=100)
     parser.add_argument("--model_size", type=str, choices=["tiny", "small"], default="tiny")
     parser.add_argument("--beta", type=float, default=1.0)
