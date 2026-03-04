@@ -1,0 +1,194 @@
+# Command Cookbook
+
+> 目的：把常用训练/评估/采样/分析命令整理成可直接粘贴执行的版本。
+> 说明：以下命令默认在 `project/` 目录执行。
+
+## 0) 环境准备（首次）
+
+```bash
+# 进入项目
+cd /Users/million/Library/CloudStorage/OneDrive-个人/2026OpticsGen/code/project
+
+# 可选：创建虚拟环境
+python -m venv .venv
+source .venv/bin/activate    # Windows: .venv\\Scripts\\activate
+
+# 安装依赖
+pip install -r requirements.txt
+```
+
+## 1) 电子向量基线（原 train_vae.py，不受 map-optical 改动影响）
+
+```bash
+# MNIST tiny 训练（经典 vector latent baseline）
+python train_vae.py \
+  --dataset mnist \
+  --model_size tiny \
+  --latent_dim 100 \
+  --beta 1.0 \
+  --epochs 30 \
+  --batch_size 128 \
+  --lr 1e-3 \
+  --recon_loss auto \
+  --out_range zero_one \
+  --data_root ./data \
+  --outdir ./outputs/vae_mnist_tiny
+```
+
+```bash
+# CIFAR-10 small 训练
+python train_vae.py \
+  --dataset cifar10 \
+  --model_size small \
+  --latent_dim 100 \
+  --beta 1.0 \
+  --epochs 50 \
+  --batch_size 128 \
+  --lr 1e-3 \
+  --recon_loss auto \
+  --out_range zero_one \
+  --data_root ./data \
+  --outdir ./outputs/vae_cifar10_small
+```
+
+```bash
+# 评估（test MSE/PSNR + 重建图）
+python eval_vae.py \
+  --checkpoint ./outputs/vae_mnist_tiny/checkpoints/best.pt \
+  --data_root ./data \
+  --outdir ./outputs/vae_mnist_tiny/eval
+```
+
+```bash
+# 随机采样
+python sample_vae.py \
+  --checkpoint ./outputs/vae_mnist_tiny/checkpoints/best.pt \
+  --n_samples 64 \
+  --grid_size 8 \
+  --outdir ./outputs/vae_mnist_tiny/sample
+```
+
+```bash
+# 潜空间分析（可选 t-SNE）
+python analyze_latent.py \
+  --checkpoint ./outputs/vae_mnist_tiny/checkpoints/best.pt \
+  --data_root ./data \
+  --run_tsne \
+  --outdir ./outputs/vae_mnist_tiny/analyze
+```
+
+## 2) Map-Latent 电子版（Electronic OLS）
+
+```bash
+# MNIST map-electronic 训练（共享 encoder/decoder，identity adapter）
+python train_map_electronic.py \
+  --config ./configs/map_electronic_mnist.yaml \
+  --data_root ./data \
+  --outdir ./outputs/map_elec_mnist
+```
+
+```bash
+# CIFAR-10 map-electronic 训练
+python train_map_electronic.py \
+  --config ./configs/map_electronic_cifar10.yaml \
+  --data_root ./data \
+  --outdir ./outputs/map_elec_cifar10
+```
+
+```bash
+# map-electronic 采样
+python sample_map_electronic.py \
+  --config ./configs/map_electronic_mnist.yaml \
+  --checkpoint ./outputs/map_elec_mnist/checkpoints/best.pt \
+  --outdir ./outputs/map_elec_mnist/sample
+```
+
+## 3) Map-Latent 光学版（Optical OLS）
+
+```bash
+# MNIST map-optical 训练（当前默认：roi_hw=null, out_hw=null, pooling 一次到 latent_hw）
+python train_map_optical.py \
+  --config ./configs/map_optical_mnist.yaml \
+  --data_root ./data \
+  --outdir ./outputs/map_opt_mnist
+```
+
+```bash
+# CIFAR-10 map-optical 训练
+python train_map_optical.py \
+  --config ./configs/map_optical_cifar10.yaml \
+  --data_root ./data \
+  --outdir ./outputs/map_opt_cifar10
+```
+
+```bash
+# map-optical 采样
+python sample_map_optical.py \
+  --config ./configs/map_optical_mnist.yaml \
+  --checkpoint ./outputs/map_opt_mnist/checkpoints/best.pt \
+  --outdir ./outputs/map_opt_mnist/sample \
+  --n_samples 64 \
+  --grid_size 8
+```
+
+```bash
+# map 模型统一评估（mode: electronic / optical）
+python eval_map.py \
+  --config ./configs/map_optical_mnist.yaml \
+  --checkpoint ./outputs/map_opt_mnist/checkpoints/best.pt \
+  --mode optical \
+  --data_root ./data \
+  --outdir ./outputs/map_opt_mnist/eval
+```
+
+```bash
+# map 潜空间分析（光学链路会统计 latent_intensity_map 的 KL_w）
+python analyze_map.py \
+  --config ./configs/map_optical_mnist.yaml \
+  --checkpoint ./outputs/map_opt_mnist/checkpoints/best.pt \
+  --data_root ./data \
+  --run_tsne \
+  --outdir ./outputs/map_opt_mnist/analyze
+```
+
+## 4) 常用覆盖参数（不改 YAML 快速试验）
+
+```bash
+# 覆盖 epochs / batch_size / lr / seed / outdir（其余仍走 YAML）
+python train_map_optical.py \
+  --config ./configs/map_optical_mnist.yaml \
+  --data_root ./data \
+  --epochs 10 \
+  --batch_size 64 \
+  --lr 5e-4 \
+  --seed 123 \
+  --outdir ./outputs/map_opt_mnist_quick
+```
+
+## 5) 结果目录速查
+
+```bash
+# 查看最近输出
+ls -lt ./outputs | head
+
+# 训练日志
+ls ./outputs/map_opt_mnist/logs
+
+# 核心结果文件
+ls ./outputs/map_opt_mnist/{history.csv,results.json,summary.csv}
+```
+
+## 6) 一键顺序跑（示例：MNIST optical train -> eval -> sample -> analyze）
+
+```bash
+python train_map_optical.py --config ./configs/map_optical_mnist.yaml --data_root ./data --outdir ./outputs/map_opt_mnist && \
+python eval_map.py --config ./configs/map_optical_mnist.yaml --checkpoint ./outputs/map_opt_mnist/checkpoints/best.pt --mode optical --data_root ./data --outdir ./outputs/map_opt_mnist/eval && \
+python sample_map_optical.py --config ./configs/map_optical_mnist.yaml --checkpoint ./outputs/map_opt_mnist/checkpoints/best.pt --outdir ./outputs/map_opt_mnist/sample && \
+python analyze_map.py --config ./configs/map_optical_mnist.yaml --checkpoint ./outputs/map_opt_mnist/checkpoints/best.pt --data_root ./data --outdir ./outputs/map_opt_mnist/analyze
+```
+
+## 7) 备注
+
+- `roi_hw` 是额外视场裁剪，不是传播 padding 的解 padding。
+- `pad/unpad` 在 `angular_spectrum_propagate` 内部完成。
+- 推荐优先用 `pool_kernel == pool_stride` 直接把 `resize_hw` 降到 `latent_hw`，减少数字后处理插值。
