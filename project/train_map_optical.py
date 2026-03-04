@@ -118,14 +118,26 @@ def save_optical_stage_visualization(optics_info: dict, path: Path, max_items: i
         idx_list = [0, min(len(stages) - 1, 1), len(stages) - 1]
 
     vis = []
+    target_h = 0
+    target_w = 0
     for idx in idx_list:
         stage = stages[idx]
         stage = stage[:max_items, :1]
         stage = stage / (stage.mean(dim=(-2, -1), keepdim=True) + 1e-6)
         stage = torch.clamp(stage, 0.0, 3.0) / 3.0
+        target_h = max(target_h, int(stage.shape[-2]))
+        target_w = max(target_w, int(stage.shape[-1]))
         vis.append(stage)
 
-    grid_tensor = torch.cat(vis, dim=0)
+    # Different optical stages can have different resolutions (e.g. sensor-pooled output),
+    # resize to a common canvas before concatenation for visualization.
+    vis_resized = []
+    for stage in vis:
+        if stage.shape[-2:] != (target_h, target_w):
+            stage = torch.nn.functional.interpolate(stage, size=(target_h, target_w), mode="nearest")
+        vis_resized.append(stage)
+
+    grid_tensor = torch.cat(vis_resized, dim=0)
     save_image_grid(grid_tensor, path=path, nrow=max_items, out_range="zero_one")
 
 
