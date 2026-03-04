@@ -1,9 +1,14 @@
 from __future__ import annotations
 
 import math
+from collections import OrderedDict
 
 import torch
 import torch.nn.functional as F
+
+
+_PROP_CACHE: "OrderedDict[tuple, dict]" = OrderedDict()
+_PROP_CACHE_MAX = 32
 
 
 def _complex_interpolate(x: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
@@ -89,26 +94,47 @@ def angular_spectrum_propagate(
 
     _, _, hp, wp = field_pad.shape
 
-    fx = torch.fft.fftfreq(wp, d=dx_m, device=field_pad.device, dtype=field_pad.real.dtype)
-    fy = torch.fft.fftfreq(hp, d=dy_m, device=field_pad.device, dtype=field_pad.real.dtype)
-    FY, FX = torch.meshgrid(fy, fx, indexing="ij")
+    key = (
+        str(field_pad.device),
+        str(field_pad.real.dtype),
+        int(h0),
+        int(w0),
+        round(float(wavelength_nm), 9),
+        round(float(pixel_pitch_um), 9),
+        round(float(z_mm), 9),
+        round(float(pad_factor), 9),
+        bool(bandlimit),
+        int(upsample_factor),
+    )
+    if key in _PROP_CACHE:
+        cached = _PROP_CACHE.pop(key)
+        _PROP_CACHE[key] = cached
+    else:
+        fx = torch.fft.fftfreq(wp, d=dx_m, device=field_pad.device, dtype=field_pad.real.dtype)
+        fy = torch.fft.fftfreq(hp, d=dy_m, device=field_pad.device, dtype=field_pad.real.dtype)
+        FY, FX = torch.meshgrid(fy, fx, indexing="ij")
 
-    inv_lambda = 1.0 / wavelength_m
-    kz_sq = inv_lambda * inv_lambda - (FX * FX + FY * FY)
-    propagating = kz_sq > 0
-    kz = torch.sqrt(torch.clamp(kz_sq, min=0.0))
+        inv_lambda = 1.0 / wavelength_m
+        kz_sq = inv_lambda * inv_lambda - (FX * FX + FY * FY)
+        propagating = kz_sq > 0
+        kz = torch.sqrt(torch.clamp(kz_sq, min=0.0))
 
-    phase = 2.0 * math.pi * z_m * kz
-    transfer = torch.exp(1j * phase)
+        phase = 2.0 * math.pi * z_m * kz
+        transfer = torch.exp(1j * phase)
 
-    mask = propagating
-    if bandlimit:
-        fx_limit, fy_limit = _distance_lowpass_limits(wavelength_m, z_m, dx_m, dy_m, hp, wp)
-        lowpass = (torch.abs(FX) <= fx_limit) & (torch.abs(FY) <= fy_limit)
-        mask = mask & lowpass
+        mask = propagating
+        if bandlimit:
+            fx_limit, fy_limit = _distance_lowpass_limits(wavelength_m, z_m, dx_m, dy_m, hp, wp)
+            lowpass = (torch.abs(FX) <= fx_limit) & (torch.abs(FY) <= fy_limit)
+            mask = mask & lowpass
 
-    transfer = transfer * mask.to(transfer.dtype)
-    transfer = transfer.unsqueeze(0).unsqueeze(0)
+        transfer = (transfer * mask.to(transfer.dtype)).unsqueeze(0).unsqueeze(0)
+        cached = {"transfer": transfer}
+        _PROP_CACHE[key] = cached
+        while len(_PROP_CACHE) > _PROP_CACHE_MAX:
+            _PROP_CACHE.popitem(last=False)
+
+    transfer = cached["transfer"]
 
     field_fft = torch.fft.fft2(field_pad)
     out_pad = torch.fft.ifft2(field_fft * transfer)

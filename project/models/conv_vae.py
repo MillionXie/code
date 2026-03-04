@@ -48,9 +48,12 @@ class ConvVAE(nn.Module):
             prev_c = c
         self.encoder = nn.Sequential(*encoder_layers)
 
+        prev_training = self.encoder.training
+        self.encoder.eval()
         with torch.no_grad():
             dummy = torch.zeros(1, in_channels, *input_size)
             enc_out = self.encoder(dummy)
+        self.encoder.train(prev_training)
         self.enc_feature_shape = tuple(enc_out.shape[1:])
         self.enc_feature_dim = int(np.prod(self.enc_feature_shape))
 

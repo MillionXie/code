@@ -27,8 +27,14 @@ loss:
     sigma: 1.0
   optical_penalty:
     mode: tv
+  kl_w:
+    var_mode: constant
+    var0: 1.0
+    m0: 0.3
+    prior_sigma0: 1.0
 
 optics:
+  field_init_mode: real
   resize_hw: [64, 64]
   wavelength_nm: 532.0
   pixel_pitch_um: 8.0
@@ -40,6 +46,7 @@ optics:
   output_center: true
   scatter:
     type: angle_limited
+    static: true
     na: 0.25
   sensor:
     roi_hw: [64, 64]

@@ -55,6 +55,7 @@ def build_adapter(cfg: dict, model: VAEMapCore, mode: str):
     return OpticalOLSAdapter(
         latent_shape=(model.latent_channels, model.latent_hw[0], model.latent_hw[1]),
         resize_hw=tuple(optics_cfg.get("resize_hw", [model.latent_hw[0], model.latent_hw[1]])),
+        field_init_mode=str(optics_cfg.get("field_init_mode", "real")),
         wavelength_nm=float(optics_cfg.get("wavelength_nm", 532.0)),
         pixel_pitch_um=float(optics_cfg.get("pixel_pitch_um", 8.0)),
         z1_mm=float(optics_cfg.get("z1_mm", 20.0)),

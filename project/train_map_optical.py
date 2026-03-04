@@ -15,7 +15,7 @@ from utils.logger import create_logger
 from utils.losses_optical import (
     compute_optical_penalty,
     compute_recon_per_sample,
-    kl_map_gaussian_prior,
+    kl_latent_intensity_biased_gaussian,
     resolve_recon_loss,
     sample_map_prior,
 )
@@ -62,6 +62,7 @@ def build_optical_adapter(cfg: dict, model: VAEMapCore) -> OpticalOLSAdapter:
     return OpticalOLSAdapter(
         latent_shape=(model.latent_channels, model.latent_hw[0], model.latent_hw[1]),
         resize_hw=tuple(optics_cfg.get("resize_hw", [model.latent_hw[0], model.latent_hw[1]])),
+        field_init_mode=str(optics_cfg.get("field_init_mode", "real")),
         wavelength_nm=float(optics_cfg.get("wavelength_nm", 532.0)),
         pixel_pitch_um=float(optics_cfg.get("pixel_pitch_um", 8.0)),
         z1_mm=float(optics_cfg.get("z1_mm", 20.0)),
@@ -103,15 +104,15 @@ def evaluate_loader(model: VAEMapCore, adapter: OpticalOLSAdapter, loader, devic
 
 @torch.no_grad()
 def save_optical_stage_visualization(optics_info: dict, path: Path, max_items: int = 6) -> None:
-    stages = optics_info.get("stage_intensities", [])
-    stage_names = optics_info.get("stage_names", [])
+    stages = optics_info.get("stage_intensity_maps", [])
+    stage_names = optics_info.get("stage_intensity_names", [])
 
     if len(stages) == 0:
         return
 
     # show representative stages for presentation: prop1, scatter, sensor
     idx_list = []
-    for target in ("prop1", "scatter", "sensor"):
+    for target in ("prop1", "scatter", "detector_roi_raw"):
         if target in stage_names:
             idx_list.append(stage_names.index(target))
     if not idx_list:
@@ -247,6 +248,7 @@ def main() -> None:
     data_cfg = cfg.get("data", {})
     loss_cfg = cfg.get("loss", {})
     prior_cfg = loss_cfg.get("prior", {"type": "biased_gaussian", "mu0": 0.25, "sigma": 1.0})
+    klw_cfg = loss_cfg.get("kl_w", {})
 
     seed = int(train_cfg.get("seed", 42))
     set_seed(seed)
@@ -286,6 +288,18 @@ def main() -> None:
     model = build_model_from_cfg(cfg, dataset_info).to(device)
     adapter = build_optical_adapter(cfg, model).to(device)
 
+    optics_cfg = cfg.get("optics", {})
+    scatter_cfg = optics_cfg.get("scatter", {})
+    logger.info(
+        "Optics | field_init_mode=%s scatter_type=%s scatter.static=%s pad_factor=%s bandlimit=%s upsample_factor=%s",
+        str(optics_cfg.get("field_init_mode", "real")),
+        str(scatter_cfg.get("type", "iid_phase")),
+        bool(getattr(adapter.scatterer, "static", scatter_cfg.get("static", True))),
+        float(optics_cfg.get("pad_factor", 2.0)),
+        bool(optics_cfg.get("bandlimit", True)),
+        int(optics_cfg.get("upsample_factor", 1)),
+    )
+
     trainable_params = count_trainable_params(model) + count_trainable_params(adapter)
     logger.info("Trainable parameters: %d", trainable_params)
 
@@ -296,6 +310,17 @@ def main() -> None:
     beta = float(loss_cfg.get("beta", 1.0))
     gamma = float(loss_cfg.get("gamma", 0.1))
     penalty_mode = str(loss_cfg.get("optical_penalty", {}).get("mode", "tv"))
+    kl_var_mode = str(klw_cfg.get("var_mode", "constant"))
+    kl_var0 = float(klw_cfg.get("var0", 1.0))
+    kl_m0 = float(klw_cfg.get("m0", prior_cfg.get("mu0", 0.25)))
+    kl_prior_sigma0 = float(klw_cfg.get("prior_sigma0", prior_cfg.get("sigma", 1.0)))
+    logger.info(
+        "KL_w | var_mode=%s var0=%.6f M0=%.6f prior_sigma0=%.6f",
+        kl_var_mode,
+        kl_var0,
+        kl_m0,
+        kl_prior_sigma0,
+    )
 
     epochs = int(train_cfg.get("epochs", 30))
     data_range = float(dataset_info.get("data_range", 1.0))
@@ -316,6 +341,9 @@ def main() -> None:
         kl_sum = 0.0
         op_sum = 0.0
         count = 0
+        latent_w_min = float("inf")
+        latent_w_max = float("-inf")
+        latent_w_mean_sum = 0.0
 
         pbar = tqdm(train_loader, desc="Epoch {}/{}".format(epoch, epochs), leave=False)
         for x, _ in pbar:
@@ -331,16 +359,17 @@ def main() -> None:
                 raise RuntimeError("Non-finite recon detected")
 
             recon_per_sample = compute_recon_per_sample(recon, x, recon_loss_type)
-            kl_per_sample = kl_map_gaussian_prior(
-                mu_map,
-                logvar_map,
-                prior_type=str(prior_cfg.get("type", "biased_gaussian")),
-                mu0=float(prior_cfg.get("mu0", 0.25)),
-                sigma=float(prior_cfg.get("sigma", 1.0)),
+            latent_intensity_map = optics_info["latent_intensity_map"]
+            kl_per_sample = kl_latent_intensity_biased_gaussian(
+                latent_intensity_map=latent_intensity_map,
+                var_mode=kl_var_mode,
+                var0=kl_var0,
+                prior_mean_m0=kl_m0,
+                prior_sigma0=kl_prior_sigma0,
                 reduction="none",
             )
             op_per_sample = compute_optical_penalty(
-                optics_info.get("stage_intensities", []),
+                optics_info.get("stage_intensity_maps", []),
                 mode=penalty_mode,
                 reduction="none",
             )
@@ -360,6 +389,9 @@ def main() -> None:
             recon_sum += recon_per_sample.sum().item()
             kl_sum += kl_per_sample.sum().item()
             op_sum += op_per_sample.sum().item()
+            latent_w_min = min(latent_w_min, float(latent_intensity_map.min().item()))
+            latent_w_max = max(latent_w_max, float(latent_intensity_map.max().item()))
+            latent_w_mean_sum += float(latent_intensity_map.mean().item()) * bsz
 
             pbar.set_postfix(
                 loss="{:.4f}".format(loss_sum / max(count, 1)),
@@ -373,6 +405,9 @@ def main() -> None:
             "recon": recon_sum / max(count, 1),
             "kl": kl_sum / max(count, 1),
             "op": op_sum / max(count, 1),
+            "latent_w_min": latent_w_min if count > 0 else 0.0,
+            "latent_w_max": latent_w_max if count > 0 else 0.0,
+            "latent_w_mean": latent_w_mean_sum / max(count, 1),
         }
         val_metrics = evaluate_loader(model, adapter, val_loader, device, data_range)
 
@@ -382,6 +417,9 @@ def main() -> None:
             "recon": train_metrics["recon"],
             "kl": train_metrics["kl"],
             "op": train_metrics["op"],
+            "latent_w_min": train_metrics["latent_w_min"],
+            "latent_w_max": train_metrics["latent_w_max"],
+            "latent_w_mean": train_metrics["latent_w_mean"],
             "val_mse": val_metrics["mse"],
             "val_psnr": val_metrics["psnr"],
         }
@@ -389,7 +427,7 @@ def main() -> None:
         append_row_csv(history_csv, row)
 
         logger.info(
-            "Epoch %d/%d | loss=%.6f recon=%.6f kl=%.6f op=%.6f val_mse=%.6f val_psnr=%.3f",
+            "Epoch %d/%d | loss=%.6f recon=%.6f kl=%.6f op=%.6f val_mse=%.6f val_psnr=%.3f latent_w[min=%.6f max=%.6f mean=%.6f]",
             epoch,
             epochs,
             row["loss"],
@@ -398,6 +436,9 @@ def main() -> None:
             row["op"],
             row["val_mse"],
             row["val_psnr"],
+            row["latent_w_min"],
+            row["latent_w_max"],
+            row["latent_w_mean"],
         )
 
         save_epoch_visuals(

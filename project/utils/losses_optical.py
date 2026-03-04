@@ -54,6 +54,56 @@ def kl_map_gaussian_prior(
     raise ValueError("Unsupported reduction: {}".format(reduction))
 
 
+def kl_latent_intensity_biased_gaussian(
+    latent_intensity_map: torch.Tensor,
+    var_mode: str = "constant",
+    var0: float = 1.0,
+    prior_mean_m0: float = 0.0,
+    prior_sigma0: float = 1.0,
+    reduction: str = "mean",
+) -> torch.Tensor:
+    """
+    KL(Q||P) on optical latent intensity w (after medium/sensor ROI+pool):
+      Q = N(M, diag(var_q))
+      P = N(M0, sigma0^2 I)
+    where M = flatten(w), M0 is biased mean, and var_q uses diagonal approximation
+    without introducing additional networks or sampling.
+    """
+    if prior_sigma0 <= 0:
+        raise ValueError("prior_sigma0 must be > 0")
+    if var0 <= 0:
+        raise ValueError("var0 must be > 0")
+
+    m = latent_intensity_map.flatten(start_dim=1)
+    device = m.device
+    dtype = m.dtype
+
+    mode = str(var_mode).lower()
+    if mode == "constant":
+        var_q = torch.full_like(m, float(var0))
+    elif mode in ("batch", "batch_var", "batch_diag"):
+        v = torch.var(m, dim=0, unbiased=False, keepdim=True)
+        var_q = torch.clamp(v, min=1e-8).expand_as(m)
+    else:
+        raise ValueError("Unsupported var_mode: {}".format(var_mode))
+
+    prior_var = float(prior_sigma0) * float(prior_sigma0)
+    log_prior_var = torch.log(torch.tensor(prior_var, device=device, dtype=dtype))
+    log_var_q = torch.log(torch.clamp(var_q, min=1e-8))
+
+    diff_sq = (m - float(prior_mean_m0)).pow(2)
+    kl_per_dim = 0.5 * (log_prior_var - log_var_q - 1.0 + var_q / prior_var + diff_sq / prior_var)
+    kl_per_sample = kl_per_dim.sum(dim=1)
+
+    if reduction == "none":
+        return kl_per_sample
+    if reduction == "mean":
+        return kl_per_sample.mean()
+    if reduction == "sum":
+        return kl_per_sample.sum()
+    raise ValueError("Unsupported reduction: {}".format(reduction))
+
+
 def compute_recon_per_sample(recon: torch.Tensor, target: torch.Tensor, recon_loss_type: str) -> torch.Tensor:
     return reconstruction_loss(recon, target, loss_type=recon_loss_type, reduction="none")
 
@@ -66,21 +116,18 @@ def _tv_per_sample(x: torch.Tensor) -> torch.Tensor:
 
 
 def compute_optical_penalty(
-    stage_intensities: Iterable[torch.Tensor],
+    stage_intensity_maps: Iterable[torch.Tensor],
     mode: str = "tv",
     reduction: str = "mean",
 ) -> torch.Tensor:
-    stage_intensities = list(stage_intensities)
-    if len(stage_intensities) == 0:
-        zero = torch.zeros(1, device="cpu")
-        if reduction == "none":
-            return zero
-        return zero.squeeze(0)
+    stage_intensity_maps = list(stage_intensity_maps)
+    if len(stage_intensity_maps) == 0:
+        raise ValueError("stage_intensity_maps is empty; optical penalty requires real intensity stages.")
 
     penalties = []
     mode = str(mode).lower()
 
-    for intensity in stage_intensities:
+    for intensity in stage_intensity_maps:
         if mode == "l2":
             per_sample = intensity.pow(2).flatten(start_dim=1).mean(dim=1)
         elif mode == "tv":
@@ -129,6 +176,7 @@ def sample_map_prior(
 __all__ = [
     "resolve_recon_loss",
     "kl_map_gaussian_prior",
+    "kl_latent_intensity_biased_gaussian",
     "compute_recon_per_sample",
     "compute_optical_penalty",
     "sample_map_prior",

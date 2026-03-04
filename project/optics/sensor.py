@@ -102,27 +102,29 @@ class IntensitySensor(nn.Module):
         raise ValueError("Unsupported normalize mode: {}".format(self.normalize))
 
     def forward(self, intensity: torch.Tensor, return_info: bool = False):
-        x = self._apply_noise(intensity)
-
+        # Keep raw ROI intensity for physical losses/inspection.
+        roi_raw = intensity
         if self.roi_hw is not None:
-            x = center_crop(x, self.roi_hw)
-        roi = x
+            roi_raw = center_crop(roi_raw, self.roi_hw)
 
+        # Sensor noise is applied after raw ROI extraction.
+        x = self._apply_noise(roi_raw)
         x = self._apply_pooling(x)
-        pooled = x
 
         if self.out_hw is not None and x.shape[-2:] != self.out_hw:
             x = F.interpolate(x, size=self.out_hw, mode="area")
 
-        x = self._normalize(x)
+        # Optical latent w must remain non-negative.
+        latent_intensity = torch.clamp(x, min=0.0)
+        final_latent = self._normalize(latent_intensity)
 
         if return_info:
-            return x, {
-                "roi_intensity": roi,
-                "pooled_intensity": pooled,
-                "final_intensity": x,
+            return final_latent, {
+                "roi_raw_intensity": roi_raw,
+                "latent_intensity_map": latent_intensity,
+                "final_latent_map": final_latent,
             }
-        return x
+        return final_latent
 
 
 __all__ = ["detect_intensity", "IntensitySensor", "center_crop"]

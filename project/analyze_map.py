@@ -8,11 +8,11 @@ import torch
 from tqdm import tqdm
 
 from data.datasets import get_dataloaders
-from models import VAEMapCore
+from models import OpticalOLSAdapter, VAEMapCore
 from utils.config import load_config
 from utils.io import flatten_dict, now_timestamp, save_json, write_summary_csv
 from utils.logger import create_logger
-from utils.losses_optical import kl_map_gaussian_prior
+from utils.losses_optical import kl_latent_intensity_biased_gaussian, kl_map_gaussian_prior
 from utils.metrics import mse_loss, psnr_from_mse
 from utils.seed import set_seed
 from utils.viz import plot_eigen_spectrum, plot_histogram, plot_scatter_2d
@@ -58,6 +58,28 @@ def build_model(cfg: dict, dataset_info: dict) -> VAEMapCore:
     )
 
 
+def build_optical_adapter_if_needed(cfg: dict, model: VAEMapCore):
+    optics_cfg = cfg.get("optics", None)
+    if not optics_cfg:
+        return None
+
+    return OpticalOLSAdapter(
+        latent_shape=(model.latent_channels, model.latent_hw[0], model.latent_hw[1]),
+        resize_hw=tuple(optics_cfg.get("resize_hw", [model.latent_hw[0], model.latent_hw[1]])),
+        field_init_mode=str(optics_cfg.get("field_init_mode", "real")),
+        wavelength_nm=float(optics_cfg.get("wavelength_nm", 532.0)),
+        pixel_pitch_um=float(optics_cfg.get("pixel_pitch_um", 8.0)),
+        z1_mm=float(optics_cfg.get("z1_mm", 20.0)),
+        z2_mm=float(optics_cfg.get("z2_mm", 20.0)),
+        pad_factor=float(optics_cfg.get("pad_factor", 2.0)),
+        bandlimit=bool(optics_cfg.get("bandlimit", True)),
+        upsample_factor=int(optics_cfg.get("upsample_factor", 1)),
+        scatter_cfg=optics_cfg.get("scatter", {}),
+        sensor_cfg=optics_cfg.get("sensor", {}),
+        output_center=bool(optics_cfg.get("output_center", True)),
+    )
+
+
 def pca_2d(x: np.ndarray, seed: int) -> np.ndarray:
     if SKLEARN_AVAILABLE:
         return PCA(n_components=2, random_state=seed).fit_transform(x)
@@ -100,8 +122,15 @@ def main() -> None:
     checkpoint = torch.load(ckpt_path, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
+    adapter = build_optical_adapter_if_needed(cfg, model)
+    if adapter is not None:
+        adapter = adapter.to(device)
+        if "adapter_state_dict" in checkpoint:
+            adapter.load_state_dict(checkpoint["adapter_state_dict"])
+        adapter.eval()
 
     prior_cfg = cfg.get("loss", {}).get("prior", {"type": "standard", "mu0": 0.0, "sigma": 1.0})
+    klw_cfg = cfg.get("loss", {}).get("kl_w", {})
 
     mu_list = []
     logvar_list = []
@@ -119,24 +148,38 @@ def main() -> None:
 
             mu_map, logvar_map = model.encode(x)
             z_map = model.reparameterize(mu_map, logvar_map)
-            recon = model.decode(z_map)
+            if adapter is not None:
+                z_mid, info = adapter(z_map, return_info=True)
+                latent_for_stats = info["latent_intensity_map"]
+                recon = model.decode(z_mid)
+                kl_ps = kl_latent_intensity_biased_gaussian(
+                    latent_intensity_map=latent_for_stats,
+                    var_mode=str(klw_cfg.get("var_mode", "constant")),
+                    var0=float(klw_cfg.get("var0", 1.0)),
+                    prior_mean_m0=float(klw_cfg.get("m0", prior_cfg.get("mu0", 0.0))),
+                    prior_sigma0=float(klw_cfg.get("prior_sigma0", prior_cfg.get("sigma", 1.0))),
+                    reduction="none",
+                )
+            else:
+                latent_for_stats = mu_map
+                recon = model.decode(z_map)
+                kl_ps = kl_map_gaussian_prior(
+                    mu_map,
+                    logvar_map,
+                    prior_type=str(prior_cfg.get("type", "standard")),
+                    mu0=float(prior_cfg.get("mu0", 0.0)),
+                    sigma=float(prior_cfg.get("sigma", 1.0)),
+                    reduction="none",
+                )
 
             mse_ps = mse_loss(recon, x, reduction="none")
             psnr_ps = psnr_from_mse(mse_ps, data_range=data_range)
-            kl_ps = kl_map_gaussian_prior(
-                mu_map,
-                logvar_map,
-                prior_type=str(prior_cfg.get("type", "standard")),
-                mu0=float(prior_cfg.get("mu0", 0.0)),
-                sigma=float(prior_cfg.get("sigma", 1.0)),
-                reduction="none",
-            )
 
             mse_sum += mse_ps.sum().item()
             psnr_sum += psnr_ps.sum().item()
             count += x.size(0)
 
-            mu_list.append(mu_map.flatten(start_dim=1).cpu().numpy())
+            mu_list.append(latent_for_stats.flatten(start_dim=1).cpu().numpy())
             logvar_list.append(logvar_map.flatten(start_dim=1).cpu().numpy())
             label_list.append(y.numpy())
             kl_list.append(kl_ps.cpu().numpy())
@@ -185,6 +228,7 @@ def main() -> None:
         "checkpoint": str(ckpt_path),
         "dataset": dataset,
         "samples": int(len(mu_all)),
+        "latent_source": "optical_latent_intensity_w" if adapter is not None else "encoder_mu_map",
         "latent_dim_flat": int(mu_all.shape[1]),
         "params_trainable": int(checkpoint.get("trainable_params", -1)),
         "mse": mse_sum / max(count, 1),

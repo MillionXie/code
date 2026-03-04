@@ -14,7 +14,13 @@ from optics.sensor import IntensitySensor, detect_intensity
 class IdentityAdapter(nn.Module):
     def forward(self, z_map: torch.Tensor, return_info: bool = False):
         if return_info:
-            return z_map, {"stage_names": ["identity"], "stage_intensities": [torch.clamp(z_map.pow(2), min=0.0)]}
+            intensity = torch.clamp(z_map.pow(2), min=0.0)
+            return z_map, {
+                "stage_intensity_names": ["identity"],
+                "stage_intensity_maps": [intensity],
+                "latent_intensity_map": intensity,
+                "final_latent_map": z_map,
+            }
         return z_map
 
 
@@ -28,6 +34,7 @@ class OpticalOLSAdapter(nn.Module):
         self,
         latent_shape: Tuple[int, int, int],
         resize_hw: Optional[Tuple[int, int]],
+        field_init_mode: str,
         wavelength_nm: float,
         pixel_pitch_um: float,
         z1_mm: float,
@@ -42,6 +49,7 @@ class OpticalOLSAdapter(nn.Module):
         super().__init__()
         self.latent_channels, self.latent_h, self.latent_w = latent_shape
         self.resize_hw = resize_hw
+        self.field_init_mode = str(field_init_mode).lower()
 
         self.wavelength_nm = float(wavelength_nm)
         self.pixel_pitch_um = float(pixel_pitch_um)
@@ -72,7 +80,13 @@ class OpticalOLSAdapter(nn.Module):
         )
 
     def _to_complex_field(self, z_map: torch.Tensor) -> torch.Tensor:
-        return torch.complex(z_map, torch.zeros_like(z_map))
+        if self.field_init_mode == "real":
+            real = z_map
+        elif self.field_init_mode == "sqrt_positive":
+            real = torch.sqrt(torch.clamp(z_map, min=0.0) + 1e-8)
+        else:
+            raise ValueError("Unsupported field_init_mode: {}".format(self.field_init_mode))
+        return torch.complex(real, torch.zeros_like(real))
 
     def _resize_field(self, E: torch.Tensor, target_hw: Optional[Tuple[int, int]]) -> torch.Tensor:
         if target_hw is None or E.shape[-2:] == target_hw:
@@ -112,27 +126,40 @@ class OpticalOLSAdapter(nn.Module):
         )
         I3 = detect_intensity(E3)
 
-        I_out, sensor_info = self.sensor(I3, return_info=True)
+        final_latent_map, sensor_info = self.sensor(I3, return_info=True)
+        latent_intensity_map = sensor_info["latent_intensity_map"]
+        roi_raw_intensity = sensor_info["roi_raw_intensity"]
 
-        if I_out.shape[-2:] != (self.latent_h, self.latent_w):
-            I_out = F.interpolate(I_out, size=(self.latent_h, self.latent_w), mode="area")
+        if final_latent_map.shape[-2:] != (self.latent_h, self.latent_w):
+            final_latent_map = F.interpolate(final_latent_map, size=(self.latent_h, self.latent_w), mode="area")
+        if latent_intensity_map.shape[-2:] != (self.latent_h, self.latent_w):
+            latent_intensity_map = F.interpolate(latent_intensity_map, size=(self.latent_h, self.latent_w), mode="area")
 
-        if I_out.shape[1] != self.latent_channels:
+        if final_latent_map.shape[1] != self.latent_channels:
             raise ValueError(
-                "Optical adapter channel mismatch: got {}, expected {}".format(I_out.shape[1], self.latent_channels)
+                "Optical adapter channel mismatch: got {}, expected {}".format(final_latent_map.shape[1], self.latent_channels)
+            )
+
+        if latent_intensity_map.shape[1] != self.latent_channels:
+            raise ValueError(
+                "Optical latent intensity channel mismatch: got {}, expected {}".format(
+                    latent_intensity_map.shape[1], self.latent_channels
+                )
             )
 
         if self.output_center:
-            I_out = I_out - I_out.mean(dim=(-2, -1), keepdim=True)
+            final_latent_map = final_latent_map - final_latent_map.mean(dim=(-2, -1), keepdim=True)
 
         if return_info:
-            return I_out, {
-                "stage_names": ["input", "prop1", "scatter", "prop2", "sensor"],
-                "stage_intensities": [I0, I1, I2, I3, I_out],
+            return final_latent_map, {
+                "stage_intensity_names": ["input", "prop1", "scatter", "detector_roi_raw"],
+                "stage_intensity_maps": [I0, I1, I2, roi_raw_intensity],
+                "latent_intensity_map": latent_intensity_map,
+                "final_latent_map": final_latent_map,
                 "sensor": sensor_info,
             }
 
-        return I_out
+        return final_latent_map
 
 
 __all__ = ["IdentityAdapter", "OpticalOLSAdapter"]
