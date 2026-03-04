@@ -49,6 +49,7 @@ def build_model_from_cfg(cfg: dict, dataset_info: dict) -> VAEMapCore:
         latent_hw=tuple(model_cfg.get("latent_hw", [4, 4])),
         encoder_channels=tuple(model_cfg.get("encoder_channels", [32, 64, 128])),
         decoder_channels=tuple(model_cfg.get("decoder_channels", [128, 64])),
+        decoder_mode=str(model_cfg.get("decoder_mode", "deconv")),
         out_range=str(cfg.get("data", {}).get("out_range", "zero_one")),
     )
 

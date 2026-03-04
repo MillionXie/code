@@ -54,6 +54,7 @@ def build_model(cfg: dict, dataset_info: dict) -> VAEMapCore:
         latent_hw=tuple(model_cfg.get("latent_hw", [4, 4])),
         encoder_channels=tuple(model_cfg.get("encoder_channels", [32, 64, 128])),
         decoder_channels=tuple(model_cfg.get("decoder_channels", [128, 64])),
+        decoder_mode=str(model_cfg.get("decoder_mode", "deconv")),
         out_range=str(cfg.get("data", {}).get("out_range", "zero_one")),
     )
 
@@ -63,10 +64,24 @@ def build_optical_adapter_if_needed(cfg: dict, model: VAEMapCore):
     if not optics_cfg:
         return None
 
+    direct_mode = str(optics_cfg.get("direct_mode", "latent_hw")).lower()
+    sensor_cfg = optics_cfg.get("sensor", {})
+    if direct_mode == "latent_hw":
+        out_hw_cfg = sensor_cfg.get("out_hw", None)
+        if out_hw_cfg is not None:
+            out_hw = tuple(out_hw_cfg)
+            if out_hw != tuple(model.latent_hw):
+                raise ValueError(
+                    "optics.sensor.out_hw {} must equal model.latent_hw {} when explicitly enabled in optics.direct_mode='latent_hw'".format(
+                        out_hw, tuple(model.latent_hw)
+                    )
+                )
+
     return OpticalOLSAdapter(
         latent_shape=(model.latent_channels, model.latent_hw[0], model.latent_hw[1]),
         resize_hw=tuple(optics_cfg.get("resize_hw", [model.latent_hw[0], model.latent_hw[1]])),
         field_init_mode=str(optics_cfg.get("field_init_mode", "real")),
+        direct_mode=direct_mode,
         wavelength_nm=float(optics_cfg.get("wavelength_nm", 532.0)),
         pixel_pitch_um=float(optics_cfg.get("pixel_pitch_um", 8.0)),
         z1_mm=float(optics_cfg.get("z1_mm", 20.0)),
@@ -75,7 +90,7 @@ def build_optical_adapter_if_needed(cfg: dict, model: VAEMapCore):
         bandlimit=bool(optics_cfg.get("bandlimit", True)),
         upsample_factor=int(optics_cfg.get("upsample_factor", 1)),
         scatter_cfg=optics_cfg.get("scatter", {}),
-        sensor_cfg=optics_cfg.get("sensor", {}),
+        sensor_cfg=sensor_cfg,
         output_center=bool(optics_cfg.get("output_center", True)),
     )
 
@@ -131,6 +146,9 @@ def main() -> None:
 
     prior_cfg = cfg.get("loss", {}).get("prior", {"type": "standard", "mu0": 0.0, "sigma": 1.0})
     klw_cfg = cfg.get("loss", {}).get("kl_w", {})
+    kl_prior_sigma0 = float(klw_cfg.get("prior_sigma0", prior_cfg.get("sigma", 1.0)))
+    kl_var0 = float(klw_cfg.get("var0", kl_prior_sigma0 * kl_prior_sigma0))
+    kl_pre_norm = str(klw_cfg.get("pre_norm", "mean"))
 
     mu_list = []
     logvar_list = []
@@ -155,9 +173,10 @@ def main() -> None:
                 kl_ps = kl_latent_intensity_biased_gaussian(
                     latent_intensity_map=latent_for_stats,
                     var_mode=str(klw_cfg.get("var_mode", "constant")),
-                    var0=float(klw_cfg.get("var0", 1.0)),
+                    var0=kl_var0,
                     prior_mean_m0=float(klw_cfg.get("m0", prior_cfg.get("mu0", 0.0))),
-                    prior_sigma0=float(klw_cfg.get("prior_sigma0", prior_cfg.get("sigma", 1.0))),
+                    prior_sigma0=kl_prior_sigma0,
+                    pre_norm=kl_pre_norm,
                     reduction="none",
                 )
             else:

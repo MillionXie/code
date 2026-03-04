@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Union
 
 from utils.io import ensure_dir
 
 
-def create_logger(name: str, outdir: str | Path, filename: str = "run.log") -> logging.Logger:
+def create_logger(name: str, outdir: Union[str, Path], filename: str = "run.log") -> logging.Logger:
     ensure_dir(outdir)
     log_path = Path(outdir) / filename
 

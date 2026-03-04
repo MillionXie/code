@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, Dict
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
@@ -24,7 +24,7 @@ class IIDPhaseMask(nn.Module):
         self.phase_sigma = float(phase_sigma)
         self.static = bool(static)
         self.register_buffer("_cached_phase_mask", None, persistent=False)
-        self._cached_meta: tuple[int, int, str, str] | None = None
+        self._cached_meta: Optional[Tuple[int, int, str, str]] = None
 
     def _sample_phase_mask(self, height: int, width: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         if self.phase_mode == "uniform":
@@ -55,7 +55,7 @@ class CorrelatedPhaseMask(nn.Module):
         self.phase_sigma = float(phase_sigma)
         self.static = bool(static)
         self.register_buffer("_cached_phase_mask", None, persistent=False)
-        self._cached_meta: tuple[int, int, str, str] | None = None
+        self._cached_meta: Optional[Tuple[int, int, str, str]] = None
 
     def _gaussian_kernel(self, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         sigma = max(self.corr_len_px, 0.5)
@@ -100,7 +100,7 @@ class AngleLimitedScattering(nn.Module):
         wavelength_nm: float,
         pixel_pitch_um: float,
         na: float = 0.25,
-        max_k: float | None = None,
+        max_k: Optional[float] = None,
         static: bool = True,
     ):
         super().__init__()
@@ -110,7 +110,7 @@ class AngleLimitedScattering(nn.Module):
         self.max_k = max_k
         self.static = bool(static)
         self.register_buffer("_cached_pupil", None, persistent=False)
-        self._cached_meta: tuple[int, int, str, str] | None = None
+        self._cached_meta: Optional[Tuple[int, int, str, str]] = None
 
     def _build_pupil(self, height: int, width: int, device: torch.device, dtype: torch.dtype) -> torch.Tensor:
         fx = torch.fft.fftfreq(width, d=self.pixel_pitch_m, device=device, dtype=dtype)

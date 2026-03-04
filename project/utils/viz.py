@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Union
 
 import matplotlib
 import numpy as np
@@ -21,7 +21,7 @@ def to_display_range(images: torch.Tensor, out_range: str = "zero_one") -> torch
     return images.clamp(0.0, 1.0)
 
 
-def save_image_grid(images: torch.Tensor, path: str | Path, nrow: int = 8, out_range: str = "zero_one") -> None:
+def save_image_grid(images: torch.Tensor, path: Union[str, Path], nrow: int = 8, out_range: str = "zero_one") -> None:
     path = Path(path)
     ensure_dir(path.parent)
     display = to_display_range(images, out_range=out_range)
@@ -32,7 +32,7 @@ def save_image_grid(images: torch.Tensor, path: str | Path, nrow: int = 8, out_r
 def save_reconstruction_comparison(
     inputs: torch.Tensor,
     recons: torch.Tensor,
-    path: str | Path,
+    path: Union[str, Path],
     max_items: int = 8,
     out_range: str = "zero_one",
 ) -> None:
@@ -43,7 +43,7 @@ def save_reconstruction_comparison(
 
 def plot_histogram(
     values: np.ndarray,
-    path: str | Path,
+    path: Union[str, Path],
     title: str,
     xlabel: str,
     bins: int = 40,
@@ -61,7 +61,7 @@ def plot_histogram(
     plt.close()
 
 
-def plot_eigen_spectrum(eigvals: np.ndarray, path: str | Path, title: str) -> None:
+def plot_eigen_spectrum(eigvals: np.ndarray, path: Union[str, Path], title: str) -> None:
     path = Path(path)
     ensure_dir(path.parent)
 
@@ -78,7 +78,7 @@ def plot_eigen_spectrum(eigvals: np.ndarray, path: str | Path, title: str) -> No
 
 def plot_scatter_2d(
     points: np.ndarray,
-    path: str | Path,
+    path: Union[str, Path],
     title: str,
     labels: Optional[np.ndarray] = None,
 ) -> None:

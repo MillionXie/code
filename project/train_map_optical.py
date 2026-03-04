@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import List, Optional
 
 import torch
 import torch.optim as optim
@@ -50,6 +51,7 @@ def build_model_from_cfg(cfg: dict, dataset_info: dict) -> VAEMapCore:
         latent_hw=tuple(model_cfg.get("latent_hw", [4, 4])),
         encoder_channels=tuple(model_cfg.get("encoder_channels", [32, 64, 128])),
         decoder_channels=tuple(model_cfg.get("decoder_channels", [128, 64])),
+        decoder_mode=str(model_cfg.get("decoder_mode", "deconv")),
         out_range=str(cfg.get("data", {}).get("out_range", "zero_one")),
     )
 
@@ -58,11 +60,23 @@ def build_optical_adapter(cfg: dict, model: VAEMapCore) -> OpticalOLSAdapter:
     optics_cfg = cfg.get("optics", {})
     if not optics_cfg:
         raise ValueError("Optical config missing: require top-level 'optics' section")
-
+    direct_mode = str(optics_cfg.get("direct_mode", "latent_hw")).lower()
+    sensor_cfg = optics_cfg.get("sensor", {})
+    if direct_mode == "latent_hw":
+        out_hw_cfg = sensor_cfg.get("out_hw", None)
+        if out_hw_cfg is not None:
+            out_hw = tuple(out_hw_cfg)
+            if out_hw != tuple(model.latent_hw):
+                raise ValueError(
+                    "optics.sensor.out_hw {} must equal model.latent_hw {} when explicitly enabled in optics.direct_mode='latent_hw'".format(
+                        out_hw, tuple(model.latent_hw)
+                    )
+                )
     return OpticalOLSAdapter(
         latent_shape=(model.latent_channels, model.latent_hw[0], model.latent_hw[1]),
         resize_hw=tuple(optics_cfg.get("resize_hw", [model.latent_hw[0], model.latent_hw[1]])),
         field_init_mode=str(optics_cfg.get("field_init_mode", "real")),
+        direct_mode=direct_mode,
         wavelength_nm=float(optics_cfg.get("wavelength_nm", 532.0)),
         pixel_pitch_um=float(optics_cfg.get("pixel_pitch_um", 8.0)),
         z1_mm=float(optics_cfg.get("z1_mm", 20.0)),
@@ -71,7 +85,7 @@ def build_optical_adapter(cfg: dict, model: VAEMapCore) -> OpticalOLSAdapter:
         bandlimit=bool(optics_cfg.get("bandlimit", True)),
         upsample_factor=int(optics_cfg.get("upsample_factor", 1)),
         scatter_cfg=optics_cfg.get("scatter", {}),
-        sensor_cfg=optics_cfg.get("sensor", {}),
+        sensor_cfg=sensor_cfg,
         output_center=bool(optics_cfg.get("output_center", True)),
     )
 
@@ -103,43 +117,69 @@ def evaluate_loader(model: VAEMapCore, adapter: OpticalOLSAdapter, loader, devic
 
 
 @torch.no_grad()
-def save_optical_stage_visualization(optics_info: dict, path: Path, max_items: int = 6) -> None:
+def save_optical_stage_visualization(
+    optics_info: dict,
+    path: Path,
+    max_items: int = 6,
+    optics_show: str = "stage",
+    sensor_path: Optional[Path] = None,
+    logger=None,
+) -> None:
     stages = optics_info.get("stage_intensity_maps", [])
     stage_names = optics_info.get("stage_intensity_names", [])
+    sensor_info = optics_info.get("sensor", {})
 
     if len(stages) == 0:
         return
 
-    # show representative stages for presentation: prop1, scatter, sensor
-    idx_list = []
-    for target in ("prop1", "scatter", "detector_roi_raw"):
-        if target in stage_names:
-            idx_list.append(stage_names.index(target))
-    if not idx_list:
-        idx_list = [0, min(len(stages) - 1, 1), len(stages) - 1]
+    def _prepare_row(x: torch.Tensor) -> torch.Tensor:
+        x = x[:max_items, :1]  # channel0 only
+        x = x / (x.mean(dim=(-2, -1), keepdim=True) + 1e-6)
+        x = torch.clamp(x, 0.0, 3.0) / 3.0
+        return x
 
-    vis = []
-    target_h = 0
-    target_w = 0
-    for idx in idx_list:
-        stage = stages[idx]
-        stage = stage[:max_items, :1]
-        stage = stage / (stage.mean(dim=(-2, -1), keepdim=True) + 1e-6)
-        stage = torch.clamp(stage, 0.0, 3.0) / 3.0
-        target_h = max(target_h, int(stage.shape[-2]))
-        target_w = max(target_w, int(stage.shape[-1]))
-        vis.append(stage)
+    def _stack_rows(rows: List[torch.Tensor]) -> torch.Tensor:
+        target_h = max(int(r.shape[-2]) for r in rows)
+        target_w = max(int(r.shape[-1]) for r in rows)
+        resized = []
+        for r in rows:
+            if r.shape[-2:] != (target_h, target_w):
+                r = torch.nn.functional.interpolate(r, size=(target_h, target_w), mode="nearest")
+            resized.append(r)
+        return torch.cat(resized, dim=0)
 
-    # Different optical stages can have different resolutions (e.g. sensor-pooled output),
-    # resize to a common canvas before concatenation for visualization.
-    vis_resized = []
-    for stage in vis:
-        if stage.shape[-2:] != (target_h, target_w):
-            stage = torch.nn.functional.interpolate(stage, size=(target_h, target_w), mode="nearest")
-        vis_resized.append(stage)
+    prop1 = stages[stage_names.index("prop1")] if "prop1" in stage_names else stages[min(len(stages) - 1, 0)]
+    scatter = stages[stage_names.index("scatter")] if "scatter" in stage_names else stages[min(len(stages) - 1, 1)]
+    sensor_roi = sensor_info.get("roi_intensity", stages[-1])
+    sensor_pooled = sensor_info.get("pooled_intensity", sensor_roi)
+    sensor_final = sensor_info.get("final_intensity", sensor_pooled)
 
-    grid_tensor = torch.cat(vis_resized, dim=0)
-    save_image_grid(grid_tensor, path=path, nrow=max_items, out_range="zero_one")
+    show_mode = str(optics_show).lower()
+    if show_mode in ("sensor_pooled", "both"):
+        sensor_row = sensor_pooled
+        sensor_row_name = "sensor_pooled_intensity"
+    else:
+        sensor_row = sensor_roi
+        sensor_row_name = "sensor_roi_intensity"
+
+    main_grid = _stack_rows([_prepare_row(prop1), _prepare_row(scatter), _prepare_row(sensor_row)])
+    save_image_grid(main_grid, path=path, nrow=max_items, out_range="zero_one")
+
+    if logger is not None:
+        logger.info(
+            "optics.png semantics: 3 rows x %d cols, channel0 only; rows=[prop1_intensity, scatter_intensity, %s], cols=samples",
+            max_items,
+            sensor_row_name,
+        )
+
+    if show_mode == "both" and sensor_path is not None:
+        sensor_grid = _stack_rows([_prepare_row(sensor_roi), _prepare_row(sensor_pooled), _prepare_row(sensor_final)])
+        save_image_grid(sensor_grid, path=sensor_path, nrow=max_items, out_range="zero_one")
+        if logger is not None:
+            logger.info(
+                "optics_sensor.png semantics: 3 rows x %d cols, channel0 only; rows=[roi_intensity, pooled_intensity, final_intensity], cols=samples",
+                max_items,
+            )
 
 
 @torch.no_grad()
@@ -156,6 +196,9 @@ def save_epoch_visuals(
     interp_dir: Path,
     optics_dir: Path,
     device: torch.device,
+    optics_show: str = "stage",
+    sample_apply_smooth: bool = False,
+    logger=None,
 ) -> None:
     model.eval()
     adapter.eval()
@@ -173,7 +216,14 @@ def save_epoch_visuals(
         out_range=out_range,
     )
 
-    save_optical_stage_visualization(info_fixed, path=optics_dir / "epoch_{:03d}_optics.png".format(epoch), max_items=6)
+    save_optical_stage_visualization(
+        info_fixed,
+        path=optics_dir / "epoch_{:03d}_optics.png".format(epoch),
+        max_items=6,
+        optics_show=optics_show,
+        sensor_path=optics_dir / "epoch_{:03d}_optics_sensor.png".format(epoch),
+        logger=logger,
+    )
 
     z_prior = sample_map_prior(
         batch_size=64,
@@ -181,6 +231,7 @@ def save_epoch_visuals(
         latent_hw=model.latent_hw,
         prior_cfg=prior_cfg,
         device=device,
+        apply_smooth=sample_apply_smooth,
     )
     sampled = model.decode(adapter(z_prior))
     save_image_grid(sampled, path=sample_dir / "epoch_{:03d}_sample.png".format(epoch), nrow=8, out_range=out_range)
@@ -249,6 +300,7 @@ def main() -> None:
     loss_cfg = cfg.get("loss", {})
     prior_cfg = loss_cfg.get("prior", {"type": "biased_gaussian", "mu0": 0.25, "sigma": 1.0})
     klw_cfg = loss_cfg.get("kl_w", {})
+    viz_cfg = cfg.get("viz", {})
 
     seed = int(train_cfg.get("seed", 42))
     set_seed(seed)
@@ -287,17 +339,35 @@ def main() -> None:
 
     model = build_model_from_cfg(cfg, dataset_info).to(device)
     adapter = build_optical_adapter(cfg, model).to(device)
+    if str(cfg.get("optics", {}).get("direct_mode", "latent_hw")).lower() == "full_res" and model.decoder_mode != "conv_refine":
+        logger.info(
+            "Warning: optics.direct_mode=full_res is typically paired with model.decoder_mode=conv_refine; current decoder_mode=%s",
+            model.decoder_mode,
+        )
 
     optics_cfg = cfg.get("optics", {})
     scatter_cfg = optics_cfg.get("scatter", {})
+    sensor_cfg = optics_cfg.get("sensor", {})
     logger.info(
-        "Optics | field_init_mode=%s scatter_type=%s scatter.static=%s pad_factor=%s bandlimit=%s upsample_factor=%s",
+        "Optics | field_init_mode=%s scatter_type=%s scatter.static=%s resize_hw=%s pad_factor=%s bandlimit=%s upsample_factor=%s direct_mode=%s",
         str(optics_cfg.get("field_init_mode", "real")),
         str(scatter_cfg.get("type", "iid_phase")),
         bool(getattr(adapter.scatterer, "static", scatter_cfg.get("static", True))),
+        tuple(optics_cfg.get("resize_hw", [model.latent_hw[0], model.latent_hw[1]])),
         float(optics_cfg.get("pad_factor", 2.0)),
         bool(optics_cfg.get("bandlimit", True)),
         int(optics_cfg.get("upsample_factor", 1)),
+        str(optics_cfg.get("direct_mode", "latent_hw")),
+    )
+    logger.info(
+        "Sensor | latent_hw=%s roi_hw=%s pool_type=%s pool_kernel=%s pool_stride=%s pool_reduce=%s out_hw=%s",
+        tuple(model.latent_hw),
+        sensor_cfg.get("roi_hw", None),
+        str(sensor_cfg.get("pool_type", "avg")),
+        sensor_cfg.get("pool_kernel", 2),
+        sensor_cfg.get("pool_stride", 2),
+        str(sensor_cfg.get("pool_reduce", "mean")),
+        sensor_cfg.get("out_hw", None),
     )
 
     trainable_params = count_trainable_params(model) + count_trainable_params(adapter)
@@ -311,15 +381,21 @@ def main() -> None:
     gamma = float(loss_cfg.get("gamma", 0.1))
     penalty_mode = str(loss_cfg.get("optical_penalty", {}).get("mode", "tv"))
     kl_var_mode = str(klw_cfg.get("var_mode", "constant"))
-    kl_var0 = float(klw_cfg.get("var0", 1.0))
     kl_m0 = float(klw_cfg.get("m0", prior_cfg.get("mu0", 0.25)))
     kl_prior_sigma0 = float(klw_cfg.get("prior_sigma0", prior_cfg.get("sigma", 1.0)))
+    kl_pre_norm = str(klw_cfg.get("pre_norm", "mean"))
+    kl_var0 = float(klw_cfg.get("var0", kl_prior_sigma0 * kl_prior_sigma0))
+    sample_apply_smooth_in_train = bool(prior_cfg.get("apply_smooth_in_train", False))
+    optics_show = str(viz_cfg.get("optics_show", "stage")).lower()
+    if optics_show not in ("stage", "sensor_roi", "sensor_pooled", "both"):
+        raise ValueError("viz.optics_show must be one of: stage|sensor_roi|sensor_pooled|both")
     logger.info(
-        "KL_w | var_mode=%s var0=%.6f M0=%.6f prior_sigma0=%.6f",
+        "KL_w | var_mode=%s var0=%.6f M0=%.6f prior_sigma0=%.6f pre_norm=%s",
         kl_var_mode,
         kl_var0,
         kl_m0,
         kl_prior_sigma0,
+        kl_pre_norm,
     )
 
     epochs = int(train_cfg.get("epochs", 30))
@@ -344,6 +420,7 @@ def main() -> None:
         latent_w_min = float("inf")
         latent_w_max = float("-inf")
         latent_w_mean_sum = 0.0
+        latent_w_std_sum = 0.0
 
         pbar = tqdm(train_loader, desc="Epoch {}/{}".format(epoch, epochs), leave=False)
         for x, _ in pbar:
@@ -366,6 +443,7 @@ def main() -> None:
                 var0=kl_var0,
                 prior_mean_m0=kl_m0,
                 prior_sigma0=kl_prior_sigma0,
+                pre_norm=kl_pre_norm,
                 reduction="none",
             )
             op_per_sample = compute_optical_penalty(
@@ -392,6 +470,7 @@ def main() -> None:
             latent_w_min = min(latent_w_min, float(latent_intensity_map.min().item()))
             latent_w_max = max(latent_w_max, float(latent_intensity_map.max().item()))
             latent_w_mean_sum += float(latent_intensity_map.mean().item()) * bsz
+            latent_w_std_sum += float(latent_intensity_map.std(unbiased=False).item()) * bsz
 
             pbar.set_postfix(
                 loss="{:.4f}".format(loss_sum / max(count, 1)),
@@ -408,6 +487,7 @@ def main() -> None:
             "latent_w_min": latent_w_min if count > 0 else 0.0,
             "latent_w_max": latent_w_max if count > 0 else 0.0,
             "latent_w_mean": latent_w_mean_sum / max(count, 1),
+            "latent_w_std": latent_w_std_sum / max(count, 1),
         }
         val_metrics = evaluate_loader(model, adapter, val_loader, device, data_range)
 
@@ -420,6 +500,7 @@ def main() -> None:
             "latent_w_min": train_metrics["latent_w_min"],
             "latent_w_max": train_metrics["latent_w_max"],
             "latent_w_mean": train_metrics["latent_w_mean"],
+            "latent_w_std": train_metrics["latent_w_std"],
             "val_mse": val_metrics["mse"],
             "val_psnr": val_metrics["psnr"],
         }
@@ -427,7 +508,7 @@ def main() -> None:
         append_row_csv(history_csv, row)
 
         logger.info(
-            "Epoch %d/%d | loss=%.6f recon=%.6f kl=%.6f op=%.6f val_mse=%.6f val_psnr=%.3f latent_w[min=%.6f max=%.6f mean=%.6f]",
+            "Epoch %d/%d | loss=%.6f recon=%.6f kl=%.6f op=%.6f val_mse=%.6f val_psnr=%.3f latent_w[min=%.6f max=%.6f mean=%.6f std=%.6f]",
             epoch,
             epochs,
             row["loss"],
@@ -439,6 +520,7 @@ def main() -> None:
             row["latent_w_min"],
             row["latent_w_max"],
             row["latent_w_mean"],
+            row["latent_w_std"],
         )
 
         save_epoch_visuals(
@@ -454,6 +536,9 @@ def main() -> None:
             interp_dir=interp_dir,
             optics_dir=optics_dir,
             device=device,
+            optics_show=optics_show,
+            sample_apply_smooth=sample_apply_smooth_in_train,
+            logger=logger,
         )
 
         save_checkpoint(

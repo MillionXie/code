@@ -8,6 +8,7 @@ model:
   latent_hw: [4, 4]
   encoder_channels: [32, 64, 128, 256]
   decoder_channels: [256, 128, 64]
+  decoder_mode: deconv
 
 train:
   epochs: 50
@@ -25,6 +26,10 @@ loss:
     type: biased_gaussian
     mu0: 0.3
     sigma: 1.0
+    apply_smooth_in_train: false
+    spatial_smooth:
+      type: gaussian
+      sigma_px: 1.5
   optical_penalty:
     mode: tv
   kl_w:
@@ -32,10 +37,13 @@ loss:
     var0: 1.0
     m0: 0.3
     prior_sigma0: 1.0
+    pre_norm: mean
 
 optics:
   field_init_mode: real
+  direct_mode: latent_hw
   resize_hw: [64, 64]
+  # NOTE: pad/unpad is handled only inside angular_spectrum_propagate.
   wavelength_nm: 532.0
   pixel_pitch_um: 8.0
   z1_mm: 30.0
@@ -49,15 +57,24 @@ optics:
     static: true
     na: 0.25
   sensor:
-    roi_hw: [64, 64]
-    pool_type: conv_stride
-    pool_kernel: 2
-    pool_stride: 2
-    out_hw: [4, 4]
+    # roi_hw is optional extra FOV crop (NOT pad/unpad). Keep null by default.
+    roi_hw: null
+    pool_type: avg
+    # Microlens-array style one-shot block aggregation: 64 -> 4 uses kernel=stride=16.
+    pool_kernel: 16
+    pool_stride: 16
+    # mean: block average; sum: block integral (ablation).
+    pool_reduce: mean
+    # out_hw is optional digital resize post-processing; keep null by default.
+    out_hw: null
+    full_res_source: roi_intensity
     normalize: mean
     noise_model: none
     poisson_scale: 1.0
     read_noise_std: 0.0
+
+viz:
+  optics_show: stage
 
 sample:
   n_samples: 64

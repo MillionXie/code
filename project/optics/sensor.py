@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple, Union
 
 import torch
 import torch.nn as nn
@@ -20,19 +20,34 @@ def center_crop(x: torch.Tensor, crop_hw: Tuple[int, int]) -> torch.Tensor:
     return x[:, :, top : top + ch, left : left + cw]
 
 
+def _to_hw(value: Union[int, Tuple[int, int], List[int]]) -> Tuple[int, int]:
+    if isinstance(value, (tuple, list)):
+        if len(value) != 2:
+            raise ValueError("Expected length 2, got {}".format(len(value)))
+        return max(int(value[0]), 1), max(int(value[1]), 1)
+    v = max(int(value), 1)
+    return v, v
+
+
 class IntensitySensor(nn.Module):
     """
     Differentiable sensor model:
-    detect/noise -> fixed ROI crop -> pooling (microlens array) -> normalize.
+    detect/noise -> optional extra ROI crop -> pooling (microlens array) -> optional digital resize -> normalize.
+
+    Notes:
+    - roi_hw is an optional extra FOV crop and is NOT the propagation padding/unpadding step.
+    - out_hw is optional digital post-processing resize; keep None to avoid interpolation.
     """
 
     def __init__(
         self,
         roi_hw: Optional[Tuple[int, int]] = None,
         pool_type: str = "avg",
-        pool_kernel: int = 2,
-        pool_stride: int = 2,
+        pool_kernel: Union[int, Tuple[int, int], List[int]] = 2,
+        pool_stride: Union[int, Tuple[int, int], List[int]] = 2,
+        pool_reduce: str = "mean",
         out_hw: Optional[Tuple[int, int]] = None,
+        expected_hw: Optional[Tuple[int, int]] = None,
         normalize: str = "mean",
         noise_model: str = "none",
         poisson_scale: float = 1.0,
@@ -40,12 +55,14 @@ class IntensitySensor(nn.Module):
     ):
         super().__init__()
         self.roi_hw = roi_hw
-        self.pool_type = pool_type
-        self.pool_kernel = int(max(pool_kernel, 1))
-        self.pool_stride = int(max(pool_stride, 1))
+        self.pool_type = str(pool_type).lower()
+        self.pool_kernel = _to_hw(pool_kernel)
+        self.pool_stride = _to_hw(pool_stride)
+        self.pool_reduce = str(pool_reduce).lower()
         self.out_hw = out_hw
-        self.normalize = normalize
-        self.noise_model = noise_model
+        self.expected_hw = expected_hw
+        self.normalize = str(normalize).lower()
+        self.noise_model = str(noise_model).lower()
         self.poisson_scale = float(poisson_scale)
         self.read_noise_std = float(read_noise_std)
 
@@ -62,24 +79,36 @@ class IntensitySensor(nn.Module):
         raise ValueError("Unsupported noise_model: {}".format(self.noise_model))
 
     def _apply_pooling(self, intensity: torch.Tensor) -> torch.Tensor:
+        k_hw = self.pool_kernel
+        s_hw = self.pool_stride
+        cell_area = float(k_hw[0] * k_hw[1])
+
         if self.pool_type == "none":
             return intensity
+
+        if self.pool_reduce == "sum" and self.pool_type in ("avg", "max", "conv_stride"):
+            pooled = F.avg_pool2d(intensity, kernel_size=k_hw, stride=s_hw)
+            return pooled * cell_area
+
+        if self.pool_reduce not in ("mean", "sum"):
+            raise ValueError("Unsupported pool_reduce: {}".format(self.pool_reduce))
+
         if self.pool_type == "avg":
-            return F.avg_pool2d(intensity, kernel_size=self.pool_kernel, stride=self.pool_stride)
+            return F.avg_pool2d(intensity, kernel_size=k_hw, stride=s_hw)
         if self.pool_type == "max":
-            return F.max_pool2d(intensity, kernel_size=self.pool_kernel, stride=self.pool_stride)
+            return F.max_pool2d(intensity, kernel_size=k_hw, stride=s_hw)
         if self.pool_type == "conv_stride":
             channels = intensity.shape[1]
             weight = torch.ones(
                 channels,
                 1,
-                self.pool_kernel,
-                self.pool_kernel,
+                k_hw[0],
+                k_hw[1],
                 device=intensity.device,
                 dtype=intensity.dtype,
             )
-            weight = weight / float(self.pool_kernel * self.pool_kernel)
-            return F.conv2d(intensity, weight, stride=self.pool_stride, padding=0, groups=channels)
+            weight = weight / cell_area
+            return F.conv2d(intensity, weight, stride=s_hw, padding=0, groups=channels)
 
         raise ValueError("Unsupported pool_type: {}".format(self.pool_type))
 
@@ -103,24 +132,35 @@ class IntensitySensor(nn.Module):
 
     def forward(self, intensity: torch.Tensor, return_info: bool = False):
         # Keep raw ROI intensity for physical losses/inspection.
-        roi_raw = intensity
+        roi_raw = torch.clamp(intensity, min=0.0)
         if self.roi_hw is not None:
             roi_raw = center_crop(roi_raw, self.roi_hw)
 
         # Sensor noise is applied after raw ROI extraction.
         x = self._apply_noise(roi_raw)
-        x = self._apply_pooling(x)
+        pooled = torch.clamp(self._apply_pooling(x), min=0.0)
 
-        if self.out_hw is not None and x.shape[-2:] != self.out_hw:
-            x = F.interpolate(x, size=self.out_hw, mode="area")
+        pooled_raw = pooled
+        if self.out_hw is not None and pooled.shape[-2:] != self.out_hw:
+            pooled = F.interpolate(pooled, size=self.out_hw, mode="area")
+        elif self.out_hw is None and self.expected_hw is not None and pooled.shape[-2:] != self.expected_hw:
+            raise ValueError(
+                "Pooled sensor map size {} does not match latent_hw {}. "
+                "请通过 pool_kernel/pool_stride 让 pooled size == latent_hw，或显式设置 out_hw 做数字缩放。".format(
+                    tuple(pooled.shape[-2:]), tuple(self.expected_hw)
+                )
+            )
 
         # Optical latent w must remain non-negative.
-        latent_intensity = torch.clamp(x, min=0.0)
+        latent_intensity = torch.clamp(pooled, min=0.0)
         final_latent = self._normalize(latent_intensity)
 
         if return_info:
             return final_latent, {
                 "roi_raw_intensity": roi_raw,
+                "roi_intensity": roi_raw,
+                "pooled_intensity": pooled_raw,
+                "final_intensity": final_latent,
                 "latent_intensity_map": latent_intensity,
                 "final_latent_map": final_latent,
             }

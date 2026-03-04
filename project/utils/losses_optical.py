@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Dict, Iterable, Optional
 
 import torch
+import torch.nn.functional as F
 
 from utils.metrics import reconstruction_loss
 
@@ -60,6 +61,8 @@ def kl_latent_intensity_biased_gaussian(
     var0: float = 1.0,
     prior_mean_m0: float = 0.0,
     prior_sigma0: float = 1.0,
+    pre_norm: str = "mean",
+    eps: float = 1e-8,
     reduction: str = "mean",
 ) -> torch.Tensor:
     """
@@ -75,6 +78,15 @@ def kl_latent_intensity_biased_gaussian(
         raise ValueError("var0 must be > 0")
 
     m = latent_intensity_map.flatten(start_dim=1)
+    pre_norm = str(pre_norm).lower()
+    if pre_norm == "mean":
+        m = m / (m.mean(dim=1, keepdim=True) + float(eps))
+    elif pre_norm == "none":
+        pass
+    else:
+        raise ValueError("Unsupported pre_norm: {}".format(pre_norm))
+
+    m = torch.clamp(m, min=0.0)
     device = m.device
     dtype = m.dtype
 
@@ -154,8 +166,9 @@ def sample_map_prior(
     batch_size: int,
     latent_channels: int,
     latent_hw: tuple[int, int],
-    prior_cfg: Optional[Dict[str, float]],
+    prior_cfg: Optional[Dict[str, object]],
     device: torch.device,
+    apply_smooth: bool = True,
 ) -> torch.Tensor:
     prior_cfg = prior_cfg or {"type": "standard", "mu0": 0.0, "sigma": 1.0}
     prior_type = str(prior_cfg.get("type", "standard")).lower()
@@ -164,6 +177,27 @@ def sample_map_prior(
 
     shape = (int(batch_size), int(latent_channels), int(latent_hw[0]), int(latent_hw[1]))
     eps = torch.randn(shape, device=device)
+
+    if apply_smooth:
+        smooth_cfg = prior_cfg.get("spatial_smooth", {}) if isinstance(prior_cfg, dict) else {}
+        smooth_type = str(smooth_cfg.get("type", "none")).lower() if isinstance(smooth_cfg, dict) else "none"
+        if smooth_type == "gaussian":
+            sigma_px = float(smooth_cfg.get("sigma_px", 1.0))
+            if sigma_px > 0:
+                size = int(max(3, round(6.0 * sigma_px)))
+                if size % 2 == 0:
+                    size += 1
+                coords = torch.arange(size, device=device, dtype=eps.dtype) - (size - 1) * 0.5
+                g = torch.exp(-(coords * coords) / (2.0 * sigma_px * sigma_px))
+                g = g / g.sum()
+                kernel2d = torch.outer(g, g)
+                kernel2d = kernel2d / kernel2d.sum()
+                kernel = kernel2d.view(1, 1, size, size).repeat(int(latent_channels), 1, 1, 1)
+                eps = F.conv2d(eps, kernel, padding=size // 2, groups=int(latent_channels))
+        elif smooth_type == "none":
+            pass
+        else:
+            raise ValueError("Unsupported spatial_smooth.type: {}".format(smooth_type))
 
     if prior_type in ("standard", "standard_gaussian", "normal"):
         return eps

@@ -4,16 +4,16 @@ import csv
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable
+from typing import Any, Dict, Iterable, List, Union
 
 
-def ensure_dir(path: str | Path) -> Path:
+def ensure_dir(path: Union[str, Path]) -> Path:
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
     return path
 
 
-def save_json(data: Dict[str, Any], path: str | Path) -> None:
+def save_json(data: Dict[str, Any], path: Union[str, Path]) -> None:
     path = Path(path)
     ensure_dir(path.parent)
     with path.open("w", encoding="utf-8") as f:
@@ -31,7 +31,7 @@ def flatten_dict(data: Dict[str, Any], parent_key: str = "", sep: str = ".") -> 
     return items
 
 
-def append_row_csv(path: str | Path, row: Dict[str, Any]) -> None:
+def append_row_csv(path: Union[str, Path], row: Dict[str, Any]) -> None:
     path = Path(path)
     ensure_dir(path.parent)
 
@@ -43,12 +43,12 @@ def append_row_csv(path: str | Path, row: Dict[str, Any]) -> None:
         writer.writerow(row)
 
 
-def write_summary_csv(path: str | Path, rows: Iterable[Dict[str, Any]]) -> None:
+def write_summary_csv(path: Union[str, Path], rows: Iterable[Dict[str, Any]]) -> None:
     rows = list(rows)
     if not rows:
         return
 
-    fieldnames: list[str] = []
+    fieldnames: List[str] = []
     seen = set()
     for row in rows:
         for key in row.keys():

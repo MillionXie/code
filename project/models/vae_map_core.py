@@ -50,6 +50,7 @@ class VAEMapCore(nn.Module):
         latent_hw: Tuple[int, int],
         encoder_channels: Sequence[int] = (32, 64, 128),
         decoder_channels: Sequence[int] = (128, 64),
+        decoder_mode: str = "deconv",
         out_range: str = "zero_one",
     ):
         super().__init__()
@@ -57,6 +58,7 @@ class VAEMapCore(nn.Module):
         self.input_size = (int(input_size[0]), int(input_size[1]))
         self.latent_channels = int(latent_channels)
         self.latent_hw = (int(latent_hw[0]), int(latent_hw[1]))
+        self.decoder_mode = str(decoder_mode).lower()
         self.out_range = out_range
 
         if not encoder_channels:
@@ -74,10 +76,18 @@ class VAEMapCore(nn.Module):
 
         dec_layers = []
         prev_c = self.latent_channels
-        for out_c in decoder_channels:
-            dec_layers.append(DeconvBlock(prev_c, int(out_c)))
-            prev_c = int(out_c)
-        self.decoder = nn.Sequential(*dec_layers)
+        if self.decoder_mode == "deconv":
+            for out_c in decoder_channels:
+                dec_layers.append(DeconvBlock(prev_c, int(out_c)))
+                prev_c = int(out_c)
+            self.decoder = nn.Sequential(*dec_layers)
+        elif self.decoder_mode == "conv_refine":
+            for out_c in decoder_channels:
+                dec_layers.append(ConvBlock(prev_c, int(out_c), stride=1))
+                prev_c = int(out_c)
+            self.decoder = nn.Sequential(*dec_layers)
+        else:
+            raise ValueError("Unsupported decoder_mode: {}".format(self.decoder_mode))
 
         self.dec_out = nn.Conv2d(prev_c, self.in_channels, kernel_size=3, stride=1, padding=1)
 
