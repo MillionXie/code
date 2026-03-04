@@ -27,7 +27,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--recon_loss", type=str, choices=["auto", "bce", "mse"], default="auto")
-    parser.add_argument("--out_range", type=str, choices=["zero_one", "neg_one_one"], default="zero_one")
+    parser.add_argument("--out_range", type=str, choices=["zero_one", "neg_one_one"], default="zero_one") # 注意：当使用 `BCE` 时必须使用 `--out_range zero_one`。
     parser.add_argument("--data_root", type=str, default="./data")
     parser.add_argument("--outdir", type=str, default=None)
     return parser.parse_args()

@@ -80,18 +80,7 @@ python train_vae.py \
 2. CIFAR-10 small 训练
 
 ```bash
-python train_vae.py \
-  --dataset cifar10 \
-  --model_size small \
-  --latent_dim 100 \
-  --beta 1.0 \
-  --epochs 50 \
-  --batch_size 128 \
-  --lr 1e-3 \
-  --recon_loss auto \
-  --out_range zero_one \
-  --data_root ./data \
-  --outdir ./outputs/cifar10_small
+python train_vae.py --dataset cifar10 --model_size small --latent_dim 100 --beta 1.0 --epochs 50 --batch_size 128 --lr 1e-3 --recon_loss auto --out_range zero_one --data_root ./data --outdir ./outputs/cifar10_small
 ```
 
 3. 评估（test MSE/PSNR + 重建图）
