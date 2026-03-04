@@ -1,0 +1,57 @@
+dataset: cifar10
+
+data:
+  out_range: zero_one
+
+model:
+  latent_channels: 24
+  latent_hw: [4, 4]
+  encoder_channels: [32, 64, 128, 256]
+  decoder_channels: [256, 128, 64]
+
+train:
+  epochs: 50
+  batch_size: 128
+  lr: 0.001
+  seed: 42
+  num_workers: 4
+  recon_loss: auto
+
+loss:
+  alpha: 1.0
+  beta: 1.0
+  gamma: 0.1
+  prior:
+    type: biased_gaussian
+    mu0: 0.3
+    sigma: 1.0
+  optical_penalty:
+    mode: tv
+
+optics:
+  resize_hw: [64, 64]
+  wavelength_nm: 532.0
+  pixel_pitch_um: 8.0
+  z1_mm: 30.0
+  z2_mm: 30.0
+  pad_factor: 2.0
+  bandlimit: true
+  upsample_factor: 1
+  output_center: true
+  scatter:
+    type: angle_limited
+    na: 0.25
+  sensor:
+    roi_hw: [64, 64]
+    pool_type: conv_stride
+    pool_kernel: 2
+    pool_stride: 2
+    out_hw: [4, 4]
+    normalize: mean
+    noise_model: none
+    poisson_scale: 1.0
+    read_noise_std: 0.0
+
+sample:
+  n_samples: 64
+  grid_size: 8

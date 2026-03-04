@@ -1,0 +1,58 @@
+dataset: mnist
+
+data:
+  out_range: zero_one
+
+model:
+  latent_channels: 16
+  latent_hw: [4, 4]
+  encoder_channels: [32, 64, 128]
+  decoder_channels: [128, 64]
+
+train:
+  epochs: 30
+  batch_size: 128
+  lr: 0.001
+  seed: 42
+  num_workers: 4
+  recon_loss: auto
+
+loss:
+  alpha: 1.0
+  beta: 1.0
+  gamma: 0.1
+  prior:
+    type: biased_gaussian
+    mu0: 0.25
+    sigma: 1.0
+  optical_penalty:
+    mode: tv
+
+optics:
+  resize_hw: [64, 64]
+  wavelength_nm: 532.0
+  pixel_pitch_um: 8.0
+  z1_mm: 20.0
+  z2_mm: 20.0
+  pad_factor: 2.0
+  bandlimit: true
+  upsample_factor: 1
+  output_center: true
+  scatter:
+    type: correlated_phase
+    phase_sigma: 1.0
+    corr_len_px: 3.0
+  sensor:
+    roi_hw: [64, 64]
+    pool_type: avg
+    pool_kernel: 2
+    pool_stride: 2
+    out_hw: [4, 4]
+    normalize: mean
+    noise_model: none
+    poisson_scale: 1.0
+    read_noise_std: 0.0
+
+sample:
+  n_samples: 64
+  grid_size: 8

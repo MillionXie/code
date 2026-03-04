@@ -140,3 +140,79 @@ python analyze_latent.py \
 - `EncoderPosteriorProvider`: 编码器后验 `q(z|x)`（可采样或直接取 `mu`）
 
 后续新增 `ScatteringProvider` 时可直接复用现有训练/生成主流程。
+
+## 新增：Map-Latent 双入口（共享 encoder/decoder）
+
+在不改动原有 `train_vae.py` 的前提下，新增两条完全分离入口：
+
+- `train_map_electronic.py`：Electronic OLS，`z_map` 直接进 decoder
+- `train_map_optical.py`：Optical OLS，`z_map -> 光学链路 -> decoder`
+
+二者共享同一核心模型 `models/vae_map_core.py`，仅中间 adapter 不同：
+
+- 电子：`IdentityAdapter`
+- 光学：`OpticalOLSAdapter`
+
+### Map-Latent 训练
+
+电子版（MNIST）：
+
+```bash
+python train_map_electronic.py \
+  --config ./configs/map_electronic_mnist.yaml \
+  --data_root ./data \
+  --outdir ./outputs/map_elec_mnist
+```
+
+光学版（MNIST）：
+
+```bash
+python train_map_optical.py \
+  --config ./configs/map_optical_mnist.yaml \
+  --data_root ./data \
+  --outdir ./outputs/map_opt_mnist
+```
+
+### Map-Latent 采样
+
+电子版采样：
+
+```bash
+python sample_map_electronic.py \
+  --config ./configs/map_electronic_mnist.yaml \
+  --checkpoint ./outputs/map_elec_mnist/checkpoints/best.pt \
+  --outdir ./outputs/map_elec_mnist/sample
+```
+
+光学版采样：
+
+```bash
+python sample_map_optical.py \
+  --config ./configs/map_optical_mnist.yaml \
+  --checkpoint ./outputs/map_opt_mnist/checkpoints/best.pt \
+  --outdir ./outputs/map_opt_mnist/sample
+```
+
+### Map-Latent 评估与分析
+
+评估：
+
+```bash
+python eval_map.py \
+  --config ./configs/map_optical_mnist.yaml \
+  --checkpoint ./outputs/map_opt_mnist/checkpoints/best.pt \
+  --mode optical \
+  --data_root ./data \
+  --outdir ./outputs/map_opt_mnist/eval
+```
+
+分析：
+
+```bash
+python analyze_map.py \
+  --config ./configs/map_optical_mnist.yaml \
+  --checkpoint ./outputs/map_opt_mnist/checkpoints/best.pt \
+  --data_root ./data \
+  --run_tsne \
+  --outdir ./outputs/map_opt_mnist/analyze
+```
