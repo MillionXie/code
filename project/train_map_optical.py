@@ -213,6 +213,7 @@ def main() -> None:
         kl_clamp_nonnegative,
         posterior_sigma,
     )
+    logger.info("KL_w is computed on: %s", kl_target)
     logger.info(
         "Sampling | prior_space=%s P(z)=N(mu0=%.6f, sigma=%.6f)",
         sample_prior_space,
@@ -267,7 +268,12 @@ def main() -> None:
 
             recon_per_sample = compute_recon_per_sample(recon, x, recon_loss_type)
             latent_intensity_map = optics_info["latent_intensity_map"]
-            kl_input_map = optics_info.get("latent_mean_map", latent_intensity_map)
+            if kl_target == "latent_mean":
+                kl_input_map = optics_info["latent_mean_map"]
+            elif kl_target == "latent_intensity":
+                kl_input_map = latent_intensity_map
+            else:
+                raise RuntimeError("Unexpected kl_target: {}".format(kl_target))
 
             kl_per_sample = kl_latent_intensity_biased_gaussian(
                 latent_intensity_map=kl_input_map,

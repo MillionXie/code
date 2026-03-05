@@ -10,7 +10,7 @@ from utils.config import load_config
 from utils.io import now_timestamp, save_json
 from utils.logger import create_logger
 from utils.losses_optical import sample_map_prior
-from utils.map_optical import build_map_core_from_cfg, build_optical_adapter_from_cfg
+from utils.map_optical import build_decoder_prior_cfg, build_map_core_from_cfg, build_optical_adapter_from_cfg
 from utils.seed import set_seed
 from utils.viz import save_image_grid
 
@@ -66,17 +66,17 @@ def main() -> None:
         kl_target = "latent_mean"
     sample_prior_space = "decoder"
 
-    decoder_prior_cfg = {
-        "type": "biased_gaussian",
-        "mu0": float(klw_cfg.get("m0", prior_cfg.get("mu0", 0.0))),
-        "sigma": float(klw_cfg.get("prior_sigma0", prior_cfg.get("sigma", 1.0))),
-        "spatial_smooth": prior_cfg.get("spatial_smooth", {}),
-    }
+    decoder_prior_cfg = build_decoder_prior_cfg(prior_cfg=prior_cfg, klw_cfg=klw_cfg)
+    sample_apply_smooth = bool(prior_cfg.get("apply_smooth_in_sample", prior_cfg.get("apply_smooth_in_train", False)))
+    smooth_cfg = decoder_prior_cfg.get("spatial_smooth", {}) if isinstance(decoder_prior_cfg, dict) else {}
+    smooth_type = str(smooth_cfg.get("type", "none")).lower() if isinstance(smooth_cfg, dict) else "none"
     logger.info(
-        "Sampling from prior P(z)=N(mu0=%.6f, sigma=%.6f) | kl_target=%s",
+        "Sampling from prior P(z)=N(mu0=%.6f, sigma=%.6f) | kl_target=%s | apply_smooth=%s smooth_type=%s",
         float(decoder_prior_cfg["mu0"]),
         float(decoder_prior_cfg["sigma"]),
         kl_target,
+        sample_apply_smooth,
+        smooth_type,
     )
 
     with torch.no_grad():
@@ -86,7 +86,7 @@ def main() -> None:
             latent_hw=model.latent_hw,
             prior_cfg=decoder_prior_cfg,
             device=device,
-            apply_smooth=True,
+            apply_smooth=sample_apply_smooth,
         )
         samples = model.decode(z_mid)
 
@@ -108,6 +108,10 @@ def main() -> None:
         "device": str(device),
         "sample_prior_space": sample_prior_space,
         "kl_target": kl_target,
+        "sample_apply_smooth": sample_apply_smooth,
+        "sample_smooth_type": smooth_type,
+        "sample_prior_mu0": float(decoder_prior_cfg["mu0"]),
+        "sample_prior_sigma": float(decoder_prior_cfg["sigma"]),
     }
     save_json(meta, outdir / "results.json")
     logger.info("Saved samples to %s", sample_path)

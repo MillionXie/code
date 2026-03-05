@@ -34,8 +34,9 @@ loss:
     mu0: 0.25
     sigma: 0.10
     apply_smooth_in_train: false
+    apply_smooth_in_sample: false
     spatial_smooth:
-      type: gaussian
+      type: none
       sigma_px: 1.5
   optical_penalty:
     mode: tv
