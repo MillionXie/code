@@ -5,8 +5,8 @@ data:
   image_size: [64, 64]
 
 model:
-  latent_channels: 16
-  latent_hw: [4, 4]
+  latent_channels: 1
+  latent_hw: [10, 10]
   # Encoder: 2 conv blocks
   encoder_channels: [32, 64]
   # Decoder: 4 conv-transpose blocks
@@ -56,7 +56,7 @@ optics:
   direct_mode: latent_hw
   # full-res optional combo:
   # direct_mode: full_res
-  resize_hw: [64, 64]
+  resize_hw: [80, 80]
   # NOTE: pad/unpad is handled only inside angular_spectrum_propagate.
   wavelength_nm: 532.0
   pixel_pitch_um: 8.0
@@ -78,8 +78,8 @@ optics:
     pool_type: avg
     # Microlens-array style one-shot block aggregation: 64 -> 4 uses kernel=stride=16.
     # For latent_hw=[8,8], set kernel=stride=8.
-    pool_kernel: 16
-    pool_stride: 16
+    pool_kernel: 8
+    pool_stride: 8
     # mean: block average; sum: block integral (ablation).
     pool_reduce: mean
     # out_hw is optional digital resize post-processing; keep null by default.
