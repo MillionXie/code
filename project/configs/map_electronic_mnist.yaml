@@ -2,12 +2,15 @@ dataset: mnist
 
 data:
   out_range: zero_one
+  image_size: [64, 64]
 
 model:
   latent_channels: 16
   latent_hw: [4, 4]
-  encoder_channels: [32, 64, 128]
-  decoder_channels: [128, 64]
+  # Encoder: 2 conv blocks
+  encoder_channels: [32, 64]
+  # Decoder: 4 conv-transpose blocks
+  decoder_channels: [256, 128, 64, 32]
 
 train:
   epochs: 30

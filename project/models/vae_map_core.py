@@ -48,8 +48,8 @@ class VAEMapCore(nn.Module):
         input_size: Tuple[int, int],
         latent_channels: int,
         latent_hw: Tuple[int, int],
-        encoder_channels: Sequence[int] = (32, 64, 128),
-        decoder_channels: Sequence[int] = (128, 64),
+        encoder_channels: Sequence[int] = (32, 64),
+        decoder_channels: Sequence[int] = (256, 128, 64, 32),
         decoder_mode: str = "deconv",
         out_range: str = "zero_one",
     ):

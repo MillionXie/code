@@ -32,7 +32,7 @@ def select_device() -> torch.device:
 
 def build_model(cfg: dict) -> VAEMapCore:
     dataset = str(cfg.get("dataset", "mnist")).lower()
-    info = get_dataset_info(dataset)
+    info = get_dataset_info(dataset, image_size=cfg.get("data", {}).get("image_size", [64, 64]))
     model_cfg = cfg.get("model", {})
     out_range = str(cfg.get("data", {}).get("out_range", "zero_one"))
 
@@ -41,8 +41,8 @@ def build_model(cfg: dict) -> VAEMapCore:
         input_size=tuple(info["image_size"]),
         latent_channels=int(model_cfg.get("latent_channels", 16)),
         latent_hw=tuple(model_cfg.get("latent_hw", [4, 4])),
-        encoder_channels=tuple(model_cfg.get("encoder_channels", [32, 64, 128])),
-        decoder_channels=tuple(model_cfg.get("decoder_channels", [128, 64])),
+        encoder_channels=tuple(model_cfg.get("encoder_channels", [32, 64])),
+        decoder_channels=tuple(model_cfg.get("decoder_channels", [256, 128, 64, 32])),
         decoder_mode=str(model_cfg.get("decoder_mode", "deconv")),
         out_range=out_range,
     )

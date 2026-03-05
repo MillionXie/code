@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Dict
+from typing import Dict, Optional, Sequence, Tuple
 
 import torch
 from torch.utils.data import DataLoader, random_split
@@ -23,15 +23,31 @@ DATASET_INFO: Dict[str, Dict[str, object]] = {
 }
 
 
-def get_dataset_info(dataset: str) -> Dict[str, object]:
+def _parse_image_size(image_size: Optional[Sequence[int]], default_hw: Tuple[int, int]) -> Tuple[int, int]:
+    if image_size is None:
+        return default_hw
+    if len(image_size) != 2:
+        raise ValueError("image_size must have length 2, got {}".format(len(image_size)))
+    return int(image_size[0]), int(image_size[1])
+
+
+def get_dataset_info(dataset: str, image_size: Optional[Sequence[int]] = None) -> Dict[str, object]:
     if dataset not in DATASET_INFO:
         raise ValueError(f"Unsupported dataset: {dataset}")
-    return DATASET_INFO[dataset].copy()
+    info = DATASET_INFO[dataset].copy()
+    info["image_size"] = _parse_image_size(image_size=image_size, default_hw=tuple(info["image_size"]))
+    return info
 
 
-def _build_transform(dataset: str, out_range: str) -> transforms.Compose:
+def _build_transform(dataset: str, out_range: str, image_size: Optional[Sequence[int]] = None) -> transforms.Compose:
     in_channels = DATASET_INFO[dataset]["in_channels"]
-    tfms: list = [transforms.ToTensor()]
+    target_hw = _parse_image_size(image_size=image_size, default_hw=tuple(DATASET_INFO[dataset]["image_size"]))
+    tfms: list = []
+
+    if target_hw != tuple(DATASET_INFO[dataset]["image_size"]):
+        tfms.append(transforms.Resize(target_hw))
+
+    tfms.append(transforms.ToTensor())
 
     if out_range == "neg_one_one":
         mean = (0.5,) * int(in_channels)
@@ -49,10 +65,11 @@ def get_dataloaders(
     out_range: str,
     seed: int,
     val_split: float = 0.1,
+    image_size: Optional[Sequence[int]] = None,
 ) -> tuple[DataLoader, DataLoader, DataLoader, Dict[str, object]]:
     dataset = dataset.lower()
-    info = get_dataset_info(dataset)
-    transform = _build_transform(dataset=dataset, out_range=out_range)
+    info = get_dataset_info(dataset, image_size=image_size)
+    transform = _build_transform(dataset=dataset, out_range=out_range, image_size=image_size)
 
     if dataset == "mnist":
         full_train = datasets.MNIST(root=data_root, train=True, download=True, transform=transform)

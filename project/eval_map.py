@@ -41,8 +41,8 @@ def build_model(cfg: dict, dataset_info: dict) -> VAEMapCore:
         input_size=tuple(dataset_info["image_size"]),
         latent_channels=int(model_cfg.get("latent_channels", 16)),
         latent_hw=tuple(model_cfg.get("latent_hw", [4, 4])),
-        encoder_channels=tuple(model_cfg.get("encoder_channels", [32, 64, 128])),
-        decoder_channels=tuple(model_cfg.get("decoder_channels", [128, 64])),
+        encoder_channels=tuple(model_cfg.get("encoder_channels", [32, 64])),
+        decoder_channels=tuple(model_cfg.get("decoder_channels", [256, 128, 64, 32])),
         decoder_mode=str(model_cfg.get("decoder_mode", "deconv")),
         out_range=str(cfg.get("data", {}).get("out_range", "zero_one")),
     )
@@ -110,6 +110,7 @@ def main() -> None:
         num_workers=args.num_workers,
         out_range=out_range,
         seed=args.seed,
+        image_size=cfg.get("data", {}).get("image_size", [64, 64]),
     )
 
     model = build_model(cfg, dataset_info).to(device)
