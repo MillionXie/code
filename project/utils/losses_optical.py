@@ -11,7 +11,7 @@ from utils.metrics import reconstruction_loss
 def resolve_recon_loss(dataset: str, recon_loss_arg: str) -> str:
     if recon_loss_arg != "auto":
         return recon_loss_arg
-    return "bce" if dataset == "mnist" else "mse"
+    return "bce" if dataset in ("mnist", "fashionmnist") else "mse"
 
 
 def kl_map_gaussian_prior(

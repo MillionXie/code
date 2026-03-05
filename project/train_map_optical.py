@@ -32,7 +32,7 @@ from utils.seed import set_seed
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train map-latent optical baseline (Optical OLS adapter)")
     parser.add_argument("--config", type=str, required=True)
-    parser.add_argument("--dataset", type=str, choices=["mnist", "cifar10"], default=None)
+    parser.add_argument("--dataset", type=str, choices=["mnist", "fashionmnist", "cifar10"], default=None)
     parser.add_argument("--data_root", type=str, default="./data")
     parser.add_argument("--outdir", type=str, default=None)
     parser.add_argument("--epochs", type=int, default=None)

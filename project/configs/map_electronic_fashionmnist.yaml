@@ -1,0 +1,36 @@
+dataset: fashionmnist
+
+data:
+  out_range: zero_one
+  image_size: [64, 64]
+
+model:
+  latent_channels: 16
+  latent_hw: [4, 4]
+  # Encoder: 2 conv blocks
+  encoder_channels: [32, 64]
+  # Decoder: 4 conv-transpose blocks
+  decoder_channels: [256, 128, 64, 32]
+
+train:
+  epochs: 30
+  batch_size: 128
+  lr: 0.001
+  seed: 42
+  num_workers: 4
+  recon_loss: auto
+
+loss:
+  alpha: 1.0
+  beta: 1.0
+  gamma: 0.0
+  prior:
+    type: standard
+    mu0: 0.0
+    sigma: 1.0
+  optical_penalty:
+    mode: tv
+
+sample:
+  n_samples: 64
+  grid_size: 8

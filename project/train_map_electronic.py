@@ -26,7 +26,7 @@ from utils.viz import save_image_grid, save_reconstruction_comparison
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train map-latent electronic baseline (Identity adapter)")
     parser.add_argument("--config", type=str, required=True)
-    parser.add_argument("--dataset", type=str, choices=["mnist", "cifar10"], default=None)
+    parser.add_argument("--dataset", type=str, choices=["mnist", "fashionmnist", "cifar10"], default=None)
     parser.add_argument("--data_root", type=str, default="./data")
     parser.add_argument("--outdir", type=str, default=None)
     parser.add_argument("--epochs", type=int, default=None)

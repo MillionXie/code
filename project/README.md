@@ -1,4 +1,4 @@
-# Electronic Baseline ConvVAE (MNIST + CIFAR-10)
+# Electronic Baseline ConvVAE (MNIST + FashionMNIST + CIFAR-10)
 
 一个可直接运行的卷积 VAE 基线工程，支持：
 - 训练（recon + beta * KL）
@@ -45,13 +45,13 @@ pip install -r requirements.txt
 
 ## 训练参数说明（核心）
 
-- `--dataset {mnist,cifar10}`
+- `--dataset {mnist,fashionmnist,cifar10}`
 - `--latent_dim`（默认 100）
 - `--model_size {tiny,small}`
 - `--beta`
 - `--epochs --batch_size --lr`
 - `--recon_loss {auto,bce,mse}`
-  - `auto`: MNIST->BCE, CIFAR-10->MSE
+  - `auto`: MNIST/FashionMNIST->BCE, CIFAR-10->MSE
 - `--out_range {zero_one,neg_one_one}`
   - `zero_one`：输出 sigmoid，输入在 `[0,1]`
   - `neg_one_one`：输出 tanh，输入在 `[-1,1]`
@@ -83,7 +83,13 @@ python train_vae.py \
 python train_vae.py --dataset cifar10 --model_size small --latent_dim 64 --beta 1.0 --epochs 50 --batch_size 128 --lr 1e-3 --recon_loss auto --out_range zero_one --data_root ./data --outdir ./outputs/cifar10_small
 ```
 
-3. 评估（test MSE/PSNR + 重建图）
+3. FashionMNIST tiny 训练
+
+```bash
+python train_vae.py --dataset fashionmnist --model_size tiny --latent_dim 64 --beta 1.0 --epochs 30 --batch_size 128 --lr 1e-3 --recon_loss auto --out_range zero_one --data_root ./data --outdir ./outputs/fashionmnist_tiny
+```
+
+4. 评估（test MSE/PSNR + 重建图）
 
 ```bash
 python eval_vae.py \
@@ -92,7 +98,7 @@ python eval_vae.py \
   --outdir ./outputs/mnist_tiny/eval
 ```
 
-4. 随机采样生成
+5. 随机采样生成
 
 ```bash
 python sample_vae.py \
@@ -102,7 +108,7 @@ python sample_vae.py \
   --outdir ./outputs/mnist_tiny/sample
 ```
 
-5. 潜空间分析
+6. 潜空间分析
 
 ```bash
 python analyze_latent.py \
@@ -174,6 +180,24 @@ python train_map_optical.py \
   --outdir ./outputs/map_opt_mnist
 ```
 
+电子版（FashionMNIST）：
+
+```bash
+python train_map_electronic.py \
+  --config ./configs/map_electronic_fashionmnist.yaml \
+  --data_root ./data \
+  --outdir ./outputs/map_elec_fashionmnist
+```
+
+光学版（FashionMNIST）：
+
+```bash
+python train_map_optical.py \
+  --config ./configs/map_optical_fashionmnist.yaml \
+  --data_root ./data \
+  --outdir ./outputs/map_opt_fashionmnist
+```
+
 ### Map-Latent 采样
 
 电子版采样：
@@ -228,3 +252,23 @@ python analyze_map.py \
 - 默认不做 ROI 裁剪、不做额外插值缩放；建议只用一次 `pool_kernel == pool_stride` 的 pooling 直接把 `resize_hw` 降到 `model.latent_hw`（微透镜阵列规则分块汇聚）。
 - 若不想池化，设 `optics.sensor.pool_type: none`，并让 `model.latent_hw` 与解 padding 后的光场尺寸一致。
 - 每个 epoch 的 `optics/epoch_xxx_optics.png` 包含 5 行：`原图`、`散射前光场`、`散射后传播到探测面的强度(池化前)`、`潜空间均值mu_w(池化后)`、`重建图`。
+
+### 光学记忆效应测试（新）
+
+新增脚本：`optics/test_scattering_memory.py`，用于固定流程
+`propagate(a) -> scatter -> propagate(b)` 比较三类散射建模（IID/Correlated/Angle-limited）在不同相关长度或 NA 下的“记忆效应”。
+
+```bash
+python optics/test_scattering_memory.py \
+  --outdir ./outputs/optics_memory_demo \
+  --distance_a_mm 20 \
+  --distance_b_mm 5 \
+  --corr_lens_px 1.0,3.0,6.0 \
+  --na_values 0.08,0.15,0.25
+```
+
+输出包括：
+- `*_intensity_grid.png`：各 tilt 输入下的探测强度图
+- `memory_peak_corr_vs_tilt.png`：峰值相关系数曲线
+- `memory_peak_shift_x_vs_tilt.png`：峰值位移曲线
+- `summary.json` / `summary.csv`：记忆范围统计（`memory_width_cpp`）

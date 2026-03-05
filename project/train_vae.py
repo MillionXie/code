@@ -15,8 +15,8 @@ from utils.viz import save_image_grid, save_reconstruction_comparison
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Train ConvVAE on MNIST/CIFAR-10")
-    parser.add_argument("--dataset", type=str, choices=["mnist", "cifar10"], default="mnist")
+    parser = argparse.ArgumentParser(description="Train ConvVAE on MNIST/FashionMNIST/CIFAR-10")
+    parser.add_argument("--dataset", type=str, choices=["mnist", "fashionmnist", "cifar10"], default="mnist")
     parser.add_argument("--latent_dim", type=int, default=64)
     parser.add_argument("--model_size", type=str, choices=["tiny", "small"], default="tiny")
     parser.add_argument("--beta", type=float, default=1.0)
@@ -35,7 +35,7 @@ def parse_args() -> argparse.Namespace:
 def resolve_recon_loss(dataset: str, recon_loss_arg: str) -> str:
     if recon_loss_arg != "auto":
         return recon_loss_arg
-    return "bce" if dataset == "mnist" else "mse"
+    return "bce" if dataset in ("mnist", "fashionmnist") else "mse"
 
 
 def select_device() -> torch.device:

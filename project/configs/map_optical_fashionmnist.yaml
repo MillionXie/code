@@ -1,0 +1,84 @@
+dataset: fashionmnist
+
+data:
+  out_range: zero_one
+  image_size: [64, 64]
+
+model:
+  arch: pure_optical
+  latent_channels: 1
+  latent_hw: [10, 10]
+  # The following conv settings are ignored when arch=pure_optical (kept for compatibility).
+  encoder_channels: [32, 64]
+  decoder_channels: [256, 128, 64, 32]
+  decoder_mode: deconv
+
+train:
+  epochs: 30
+  batch_size: 128
+  lr: 0.001
+  seed: 42
+  num_workers: 4
+  recon_loss: auto
+
+loss:
+  alpha: 1.0
+  beta: 1.0
+  gamma: 0.1
+  posterior_sigma: 0.10
+  prior:
+    type: biased_gaussian
+    mu0: 0.25
+    sigma: 0.10
+    apply_smooth_in_train: false
+    apply_smooth_in_sample: false
+    spatial_smooth:
+      type: none
+      sigma_px: 1.5
+  optical_penalty:
+    mode: tv
+  kl_w:
+    target: latent_mean
+    var_mode: constant
+    m0: 0.25
+    prior_sigma0: 0.10
+    pre_norm: none
+    clamp_nonnegative: true
+
+optics:
+  field_init_mode: real
+  resize_hw: [200, 200]
+  wavelength_nm: 532.0
+  pixel_pitch_um: 8.0
+  diffractive_layers:
+    z_mm: [20.0, 20.0]
+    trainable: true
+    init: uniform
+  z_to_scatter_mm: 20.0
+  z_to_sensor_mm: 1.0
+  posterior_sigma: 0.10
+  decoder:
+    field_init_mode: sqrt_positive
+    resize_hw: [200, 200]
+    latent_to_field_mode: repeat
+    layer_z_mm: [20.0, 20.0, 20.0, 20.0]
+    z_to_sensor_mm: 20.0
+    trainable: true
+    init: uniform
+  pad_factor: 2.0
+  bandlimit: true
+  upsample_factor: 1
+  scatter:
+    type: correlated_phase
+    static: true
+    phase_sigma: 1.0
+    corr_len_px: 3.0
+  sensor:
+    pool_type: avg
+    pool_kernel: 20
+    pool_stride: 20
+    pool_reduce: mean
+
+sample:
+  n_samples: 64
+  grid_size: 8

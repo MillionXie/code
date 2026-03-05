@@ -52,6 +52,22 @@ python train_vae.py \
 ```
 
 ```bash
+# FashionMNIST tiny 训练
+python train_vae.py \
+  --dataset fashionmnist \
+  --model_size tiny \
+  --latent_dim 64 \
+  --beta 1.0 \
+  --epochs 30 \
+  --batch_size 128 \
+  --lr 1e-3 \
+  --recon_loss auto \
+  --out_range zero_one \
+  --data_root ./data \
+  --outdir ./outputs/vae_fashionmnist_tiny
+```
+
+```bash
 # 评估（test MSE/PSNR + 重建图）
 python eval_vae.py \
   --checkpoint ./outputs/vae_mnist_tiny/checkpoints/best.pt \
@@ -96,6 +112,14 @@ python train_map_electronic.py \
 ```
 
 ```bash
+# FashionMNIST map-electronic 训练
+python train_map_electronic.py \
+  --config ./configs/map_electronic_fashionmnist.yaml \
+  --data_root ./data \
+  --outdir ./outputs/map_elec_fashionmnist
+```
+
+```bash
 # map-electronic 采样
 python sample_map_electronic.py \
   --config ./configs/map_electronic_mnist.yaml \
@@ -119,6 +143,14 @@ python train_map_optical.py \
   --config ./configs/map_optical_cifar10.yaml \
   --data_root ./data \
   --outdir ./outputs/map_opt_cifar10
+```
+
+```bash
+# FashionMNIST map-optical 训练
+python train_map_optical.py \
+  --config ./configs/map_optical_fashionmnist.yaml \
+  --data_root ./data \
+  --outdir ./outputs/map_opt_fashionmnist
 ```
 
 ```bash
@@ -196,3 +228,26 @@ python analyze_map.py --config ./configs/map_optical_mnist.yaml --checkpoint ./o
 - `sample_map_optical.py` 直接从先验 `P(z)=N(m0, prior_sigma0^2)` 采样后送 decoder（不再走光学链路）。
 - 推荐优先用 `pool_kernel == pool_stride` 直接把 `resize_hw` 降到 `latent_hw`，不做额外数字后处理缩放。
 - 若要关闭池化，设 `pool_type=none`，并把 `latent_hw` 设成与解 padding 后光场一致的尺寸。
+
+## 8) 散射介质记忆效应测试（新）
+
+```bash
+# 传播距离 a -> 散射介质 -> 传播距离 b，比较三种散射建模与相关长度/NA 对记忆效应的影响
+python optics/test_scattering_memory.py \
+  --outdir ./outputs/optics_memory_demo \
+  --distance_a_mm 20 \
+  --distance_b_mm 5 \
+  --corr_lens_px 1.0,3.0,6.0 \
+  --na_values 0.08,0.15,0.25 \
+  --n_tilts 11 \
+  --tilt_max_cpp 0.03
+```
+
+```bash
+# 关闭 bandlimit 或改成动态散射（ablation）
+python optics/test_scattering_memory.py \
+  --outdir ./outputs/optics_memory_ablation \
+  --no_bandlimit \
+  --dynamic_scatter \
+  --corr_lens_px 0.5,2.0,5.0
+```

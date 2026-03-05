@@ -15,6 +15,11 @@ DATASET_INFO: Dict[str, Dict[str, object]] = {
         "image_size": (28, 28),
         "num_classes": 10,
     },
+    "fashionmnist": {
+        "in_channels": 1,
+        "image_size": (28, 28),
+        "num_classes": 10,
+    },
     "cifar10": {
         "in_channels": 3,
         "image_size": (32, 32),
@@ -74,6 +79,9 @@ def get_dataloaders(
     if dataset == "mnist":
         full_train = datasets.MNIST(root=data_root, train=True, download=True, transform=transform)
         test_set = datasets.MNIST(root=data_root, train=False, download=True, transform=transform)
+    elif dataset == "fashionmnist":
+        full_train = datasets.FashionMNIST(root=data_root, train=True, download=True, transform=transform)
+        test_set = datasets.FashionMNIST(root=data_root, train=False, download=True, transform=transform)
     elif dataset == "cifar10":
         full_train = datasets.CIFAR10(root=data_root, train=True, download=True, transform=transform)
         test_set = datasets.CIFAR10(root=data_root, train=False, download=True, transform=transform)
