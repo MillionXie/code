@@ -182,6 +182,17 @@ def save_optical_stage_visualization(
             )
 
 
+def build_decoder_prior_cfg(prior_cfg: dict, klw_cfg: dict) -> dict:
+    mu0 = float(klw_cfg.get("m0", prior_cfg.get("mu0", 0.0)))
+    sigma0 = float(klw_cfg.get("prior_sigma0", prior_cfg.get("sigma", 1.0)))
+    return {
+        "type": "biased_gaussian",
+        "mu0": mu0,
+        "sigma": sigma0,
+        "spatial_smooth": prior_cfg.get("spatial_smooth", {}),
+    }
+
+
 @torch.no_grad()
 def save_epoch_visuals(
     model: VAEMapCore,
@@ -198,6 +209,9 @@ def save_epoch_visuals(
     device: torch.device,
     optics_show: str = "stage",
     sample_apply_smooth: bool = False,
+    sample_prior_space: str = "z_map",
+    decoder_prior_cfg: Optional[dict] = None,
+    direct_mode: str = "latent_hw",
     logger=None,
 ) -> None:
     model.eval()
@@ -225,15 +239,27 @@ def save_epoch_visuals(
         logger=logger,
     )
 
-    z_prior = sample_map_prior(
-        batch_size=64,
-        latent_channels=model.latent_channels,
-        latent_hw=model.latent_hw,
-        prior_cfg=prior_cfg,
-        device=device,
-        apply_smooth=sample_apply_smooth,
-    )
-    sampled = model.decode(adapter(z_prior))
+    sample_prior_space = str(sample_prior_space).lower()
+    if sample_prior_space == "decoder" and str(direct_mode).lower() == "latent_hw":
+        z_mid_prior = sample_map_prior(
+            batch_size=64,
+            latent_channels=model.latent_channels,
+            latent_hw=model.latent_hw,
+            prior_cfg=decoder_prior_cfg or prior_cfg,
+            device=device,
+            apply_smooth=sample_apply_smooth,
+        )
+        sampled = model.decode(z_mid_prior)
+    else:
+        z_prior = sample_map_prior(
+            batch_size=64,
+            latent_channels=model.latent_channels,
+            latent_hw=model.latent_hw,
+            prior_cfg=prior_cfg,
+            device=device,
+            apply_smooth=sample_apply_smooth,
+        )
+        sampled = model.decode(adapter(z_prior))
     save_image_grid(sampled, path=sample_dir / "epoch_{:03d}_sample.png".format(epoch), nrow=8, out_range=out_range)
 
     interp_batch = next(iter(val_loader))[0]
@@ -381,22 +407,47 @@ def main() -> None:
     gamma = float(loss_cfg.get("gamma", 0.1))
     penalty_mode = str(loss_cfg.get("optical_penalty", {}).get("mode", "tv"))
     kl_var_mode = str(klw_cfg.get("var_mode", "constant"))
+    kl_target = str(klw_cfg.get("target", "final_latent")).lower()
     kl_m0 = float(klw_cfg.get("m0", prior_cfg.get("mu0", 0.25)))
     kl_prior_sigma0 = float(klw_cfg.get("prior_sigma0", prior_cfg.get("sigma", 1.0)))
-    kl_pre_norm = str(klw_cfg.get("pre_norm", "mean"))
+    if "pre_norm" in klw_cfg:
+        kl_pre_norm = str(klw_cfg.get("pre_norm"))
+    else:
+        kl_pre_norm = "none" if kl_target == "final_latent" else "mean"
     kl_var0 = float(klw_cfg.get("var0", kl_prior_sigma0 * kl_prior_sigma0))
+    kl_clamp_nonnegative = bool(klw_cfg.get("clamp_nonnegative", kl_target != "final_latent"))
+    if kl_target not in ("latent_intensity", "final_latent"):
+        raise ValueError("loss.kl_w.target must be one of: latent_intensity|final_latent")
+
     sample_apply_smooth_in_train = bool(prior_cfg.get("apply_smooth_in_train", False))
+    direct_mode = str(optics_cfg.get("direct_mode", "latent_hw")).lower()
+    sample_cfg = cfg.get("sample", {})
+    sample_prior_space = str(sample_cfg.get("prior_space", "auto")).lower()
+    if sample_prior_space == "auto":
+        sample_prior_space = "decoder" if (kl_target == "final_latent" and direct_mode == "latent_hw") else "z_map"
+    if sample_prior_space not in ("decoder", "z_map"):
+        raise ValueError("sample.prior_space must be one of: auto|decoder|z_map")
+    if sample_prior_space == "decoder" and direct_mode != "latent_hw":
+        logger.info(
+            "sample.prior_space=decoder is only supported in optics.direct_mode=latent_hw. Falling back to z_map sampling."
+        )
+        sample_prior_space = "z_map"
+    decoder_prior_cfg = build_decoder_prior_cfg(prior_cfg=prior_cfg, klw_cfg=klw_cfg)
+
     optics_show = str(viz_cfg.get("optics_show", "stage")).lower()
     if optics_show not in ("stage", "sensor_roi", "sensor_pooled", "both"):
         raise ValueError("viz.optics_show must be one of: stage|sensor_roi|sensor_pooled|both")
     logger.info(
-        "KL_w | var_mode=%s var0=%.6f M0=%.6f prior_sigma0=%.6f pre_norm=%s",
+        "KL_w | target=%s var_mode=%s var0=%.6f M0=%.6f prior_sigma0=%.6f pre_norm=%s clamp_nonnegative=%s",
+        kl_target,
         kl_var_mode,
         kl_var0,
         kl_m0,
         kl_prior_sigma0,
         kl_pre_norm,
+        kl_clamp_nonnegative,
     )
+    logger.info("Sampling | prior_space=%s", sample_prior_space)
 
     epochs = int(train_cfg.get("epochs", 30))
     data_range = float(dataset_info.get("data_range", 1.0))
@@ -437,13 +488,18 @@ def main() -> None:
 
             recon_per_sample = compute_recon_per_sample(recon, x, recon_loss_type)
             latent_intensity_map = optics_info["latent_intensity_map"]
+            if kl_target == "final_latent":
+                kl_input_map = optics_info["final_latent_map"]
+            else:
+                kl_input_map = latent_intensity_map
             kl_per_sample = kl_latent_intensity_biased_gaussian(
-                latent_intensity_map=latent_intensity_map,
+                latent_intensity_map=kl_input_map,
                 var_mode=kl_var_mode,
                 var0=kl_var0,
                 prior_mean_m0=kl_m0,
                 prior_sigma0=kl_prior_sigma0,
                 pre_norm=kl_pre_norm,
+                clamp_nonnegative=kl_clamp_nonnegative,
                 reduction="none",
             )
             op_per_sample = compute_optical_penalty(
@@ -538,6 +594,9 @@ def main() -> None:
             device=device,
             optics_show=optics_show,
             sample_apply_smooth=sample_apply_smooth_in_train,
+            sample_prior_space=sample_prior_space,
+            decoder_prior_cfg=decoder_prior_cfg,
+            direct_mode=direct_mode,
             logger=logger,
         )
 

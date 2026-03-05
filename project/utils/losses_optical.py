@@ -63,6 +63,7 @@ def kl_latent_intensity_biased_gaussian(
     prior_sigma0: float = 1.0,
     pre_norm: str = "mean",
     eps: float = 1e-8,
+    clamp_nonnegative: bool = True,
     reduction: str = "mean",
 ) -> torch.Tensor:
     """
@@ -86,7 +87,8 @@ def kl_latent_intensity_biased_gaussian(
     else:
         raise ValueError("Unsupported pre_norm: {}".format(pre_norm))
 
-    m = torch.clamp(m, min=0.0)
+    if clamp_nonnegative:
+        m = torch.clamp(m, min=0.0)
     device = m.device
     dtype = m.dtype
 

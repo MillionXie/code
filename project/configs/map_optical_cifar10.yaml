@@ -33,11 +33,17 @@ loss:
   optical_penalty:
     mode: tv
   kl_w:
+    # KL target space:
+    # - final_latent: decoder input (recommended for sampling consistency)
+    # - latent_intensity: optical intensity w
+    target: final_latent
     var_mode: constant
     var0: 1.0
-    m0: 0.3
+    # For sensor.normalize=mean, final_latent has sample mean near 1.0.
+    m0: 1.0
     prior_sigma0: 1.0
-    pre_norm: mean
+    pre_norm: none
+    clamp_nonnegative: true
 
 optics:
   field_init_mode: real
@@ -51,7 +57,8 @@ optics:
   pad_factor: 2.0
   bandlimit: true
   upsample_factor: 1
-  output_center: true
+  # Keep decoder input non-negative for physical latent semantics.
+  output_center: false
   scatter:
     type: angle_limited
     static: true

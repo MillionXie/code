@@ -109,19 +109,49 @@ def main() -> None:
     model.eval()
     adapter.eval()
 
-    prior_cfg = cfg.get("loss", {}).get("prior", {"type": "biased_gaussian", "mu0": 0.25, "sigma": 1.0})
+    loss_cfg = cfg.get("loss", {})
+    prior_cfg = loss_cfg.get("prior", {"type": "biased_gaussian", "mu0": 0.25, "sigma": 1.0})
+    klw_cfg = loss_cfg.get("kl_w", {})
+    direct_mode = str(cfg.get("optics", {}).get("direct_mode", "latent_hw")).lower()
+    kl_target = str(klw_cfg.get("target", "final_latent")).lower()
+    sample_prior_space = str(cfg.get("sample", {}).get("prior_space", "auto")).lower()
+    if sample_prior_space == "auto":
+        sample_prior_space = "decoder" if (kl_target == "final_latent" and direct_mode == "latent_hw") else "z_map"
+    if sample_prior_space not in ("decoder", "z_map"):
+        raise ValueError("sample.prior_space must be one of: auto|decoder|z_map")
+    if sample_prior_space == "decoder" and direct_mode != "latent_hw":
+        logger.info("sample.prior_space=decoder is not supported for direct_mode=%s, fallback to z_map", direct_mode)
+        sample_prior_space = "z_map"
+
+    decoder_prior_cfg = {
+        "type": "biased_gaussian",
+        "mu0": float(klw_cfg.get("m0", prior_cfg.get("mu0", 0.0))),
+        "sigma": float(klw_cfg.get("prior_sigma0", prior_cfg.get("sigma", 1.0))),
+        "spatial_smooth": prior_cfg.get("spatial_smooth", {}),
+    }
 
     with torch.no_grad():
-        z_map = sample_map_prior(
-            batch_size=args.n_samples,
-            latent_channels=model.latent_channels,
-            latent_hw=model.latent_hw,
-            prior_cfg=prior_cfg,
-            device=device,
-            apply_smooth=True,
-        )
-        z_mid = adapter(z_map)
-        samples = model.decode(z_mid)
+        if sample_prior_space == "decoder":
+            z_mid = sample_map_prior(
+                batch_size=args.n_samples,
+                latent_channels=model.latent_channels,
+                latent_hw=model.latent_hw,
+                prior_cfg=decoder_prior_cfg,
+                device=device,
+                apply_smooth=True,
+            )
+            samples = model.decode(z_mid)
+        else:
+            z_map = sample_map_prior(
+                batch_size=args.n_samples,
+                latent_channels=model.latent_channels,
+                latent_hw=model.latent_hw,
+                prior_cfg=prior_cfg,
+                device=device,
+                apply_smooth=True,
+            )
+            z_mid = adapter(z_map)
+            samples = model.decode(z_mid)
 
     sample_path = outdir / "samples.png"
     save_image_grid(
@@ -139,6 +169,8 @@ def main() -> None:
         "seed": args.seed,
         "sample_path": str(sample_path),
         "device": str(device),
+        "sample_prior_space": sample_prior_space,
+        "kl_target": kl_target,
     }
     save_json(meta, outdir / "results.json")
     logger.info("Saved samples to %s", sample_path)

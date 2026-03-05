@@ -148,7 +148,14 @@ def main() -> None:
     klw_cfg = cfg.get("loss", {}).get("kl_w", {})
     kl_prior_sigma0 = float(klw_cfg.get("prior_sigma0", prior_cfg.get("sigma", 1.0)))
     kl_var0 = float(klw_cfg.get("var0", kl_prior_sigma0 * kl_prior_sigma0))
-    kl_pre_norm = str(klw_cfg.get("pre_norm", "mean"))
+    kl_target = str(klw_cfg.get("target", "final_latent")).lower()
+    if "pre_norm" in klw_cfg:
+        kl_pre_norm = str(klw_cfg.get("pre_norm"))
+    else:
+        kl_pre_norm = "none" if kl_target == "final_latent" else "mean"
+    kl_clamp_nonnegative = bool(klw_cfg.get("clamp_nonnegative", kl_target != "final_latent"))
+    if kl_target not in ("latent_intensity", "final_latent"):
+        raise ValueError("loss.kl_w.target must be one of: latent_intensity|final_latent")
 
     mu_list = []
     logvar_list = []
@@ -168,7 +175,10 @@ def main() -> None:
             z_map = model.reparameterize(mu_map, logvar_map)
             if adapter is not None:
                 z_mid, info = adapter(z_map, return_info=True)
-                latent_for_stats = info["latent_intensity_map"]
+                if kl_target == "final_latent":
+                    latent_for_stats = info["final_latent_map"]
+                else:
+                    latent_for_stats = info["latent_intensity_map"]
                 recon = model.decode(z_mid)
                 kl_ps = kl_latent_intensity_biased_gaussian(
                     latent_intensity_map=latent_for_stats,
@@ -177,6 +187,7 @@ def main() -> None:
                     prior_mean_m0=float(klw_cfg.get("m0", prior_cfg.get("mu0", 0.0))),
                     prior_sigma0=kl_prior_sigma0,
                     pre_norm=kl_pre_norm,
+                    clamp_nonnegative=kl_clamp_nonnegative,
                     reduction="none",
                 )
             else:
@@ -247,7 +258,7 @@ def main() -> None:
         "checkpoint": str(ckpt_path),
         "dataset": dataset,
         "samples": int(len(mu_all)),
-        "latent_source": "optical_latent_intensity_w" if adapter is not None else "encoder_mu_map",
+        "latent_source": ("optical_" + kl_target) if adapter is not None else "encoder_mu_map",
         "latent_dim_flat": int(mu_all.shape[1]),
         "params_trainable": int(checkpoint.get("trainable_params", -1)),
         "mse": mse_sum / max(count, 1),
