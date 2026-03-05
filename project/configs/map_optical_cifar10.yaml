@@ -2,7 +2,7 @@ dataset: cifar10
 
 data:
   out_range: zero_one
-  image_size: [64, 64]
+  image_size: [200, 200]
 
 model:
   arch: pure_optical
@@ -26,11 +26,11 @@ loss:
   beta: 1.0
   gamma: 0.1
   # sigma of q(w|x)=N(mu_w, sigma^2 I), fixed (not learned)
-  posterior_sigma: 0.10
+  posterior_sigma: 0.02
   prior:
     type: biased_gaussian
-    mu0: 0.3
-    sigma: 0.10
+    mu0: 0.27
+    sigma: 0.13
     apply_smooth_in_train: false
     apply_smooth_in_sample: false
     spatial_smooth:
@@ -44,15 +44,15 @@ loss:
     var_mode: constant
     # If omitted, var0 defaults to posterior_sigma^2.
     # var0: 0.01
-    m0: 0.30
-    prior_sigma0: 0.10
+    m0: 0.27
+    prior_sigma0: 0.13
     pre_norm: none
     clamp_nonnegative: true
 
 optics:
   field_init_mode: real
   # Two diffractive phase layers are simulated on a 200x200 grid (8um pitch).
-  resize_hw: [200, 200]
+  resize_hw: [400, 400]
   # NOTE: pad/unpad is handled only inside angular_spectrum_propagate.
   wavelength_nm: 532.0
   pixel_pitch_um: 8.0
@@ -65,7 +65,7 @@ optics:
   posterior_sigma: 0.10
   decoder:
     field_init_mode: sqrt_positive
-    resize_hw: [200, 200]
+    resize_hw: [400, 400]
     # 10x10 latent -> 200x200 field by block repeat (physically consistent inverse mapping).
     latent_to_field_mode: repeat
     layer_z_mm: [30.0, 30.0, 30.0, 30.0]
@@ -84,8 +84,8 @@ optics:
     pool_type: avg
     # If you want no pooling, set pool_type: none and make latent_hw == resize_hw.
     # 200x200 field -> 10x10 latent in one step.
-    pool_kernel: 20
-    pool_stride: 20
+    pool_kernel: 40
+    pool_stride: 40
     # mean: block average; sum: block integral (ablation).
     pool_reduce: mean
 
