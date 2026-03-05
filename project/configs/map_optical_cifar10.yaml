@@ -72,7 +72,7 @@ optics:
     z_to_sensor_mm: 30.0
     trainable: true
     init: uniform
-  pad_factor: 2.0
+  pad_factor: 1.0
   bandlimit: true
   upsample_factor: 1
   scatter:
