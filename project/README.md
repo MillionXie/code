@@ -220,6 +220,8 @@ python analyze_map.py \
 ### Optical Sensor/Pooling 物理约定
 
 - `pad/unpad` 仅在 `angular_spectrum_propagate` 内部处理。
-- 光学链路统一为：`输入场 -> 传播 -> 散射 -> 传播 -> 强度探测 -> 可选 pooling -> 潜空间`。
+- 光学编码链路统一为：`输入图像(上采样到200x200) -> (传播+相位层)x2 -> 传播到散射介质 -> 静态散射 -> 短距离传播 -> 强度探测 -> pooling -> mu_w`。
+- 训练时采用 `q(w|x)=N(mu_w, sigma_post^2 I)`，其中 `sigma_post` 为常数（不学习），采样得到 decoder 输入。
+- KL 在 `mu_w` 上按 biased Gaussian prior 计算（`m0`,`prior_sigma0` 由配置指定）。
 - 默认不做 ROI 裁剪、不做额外插值缩放；建议只用一次 `pool_kernel == pool_stride` 的 pooling 直接把 `resize_hw` 降到 `model.latent_hw`（微透镜阵列规则分块汇聚）。
 - 若不想池化，设 `optics.sensor.pool_type: none`，并让 `model.latent_hw` 与解 padding 后的光场尺寸一致。

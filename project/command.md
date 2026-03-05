@@ -106,7 +106,7 @@ python sample_map_electronic.py \
 ## 3) Map-Latent 光学版（Optical OLS）
 
 ```bash
-# MNIST map-optical 训练（默认流程：传播/散射后强度 -> 一次 pooling 到 latent_hw）
+# MNIST map-optical 训练（两层200x200衍射层 -> 静态散射 -> mu_w + 固定sigma采样）
 python train_map_optical.py \
   --config ./configs/map_optical_mnist.yaml \
   --data_root ./data \
@@ -190,5 +190,7 @@ python analyze_map.py --config ./configs/map_optical_mnist.yaml --checkpoint ./o
 ## 7) 备注
 
 - `pad/unpad` 在 `angular_spectrum_propagate` 内部完成。
+- 当前默认光学 encoder：`(prop+phase)x2` + `scatter(static)` + `sensor pooling`。
+- KL 作用在散射后潜空间均值 `mu_w`，posterior 方差由 `loss.posterior_sigma` 固定。
 - 推荐优先用 `pool_kernel == pool_stride` 直接把 `resize_hw` 降到 `latent_hw`，不做额外数字后处理缩放。
 - 若要关闭池化，设 `pool_type=none`，并把 `latent_hw` 设成与解 padding 后光场一致的尺寸。

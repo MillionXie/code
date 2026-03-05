@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 import numpy as np
@@ -104,16 +105,19 @@ def main() -> None:
 
     prior_cfg = cfg.get("loss", {}).get("prior", {"type": "standard", "mu0": 0.0, "sigma": 1.0})
     klw_cfg = cfg.get("loss", {}).get("kl_w", {})
+    posterior_sigma = float(cfg.get("loss", {}).get("posterior_sigma", cfg.get("optics", {}).get("posterior_sigma", 0.1)))
     kl_prior_sigma0 = float(klw_cfg.get("prior_sigma0", prior_cfg.get("sigma", 1.0)))
-    kl_var0 = float(klw_cfg.get("var0", kl_prior_sigma0 * kl_prior_sigma0))
-    kl_target = str(klw_cfg.get("target", "final_latent")).lower()
+    kl_var0 = float(klw_cfg.get("var0", posterior_sigma * posterior_sigma if posterior_sigma > 0 else 1e-8))
+    kl_target = str(klw_cfg.get("target", "latent_mean")).lower()
+    if kl_target == "final_latent":
+        kl_target = "latent_mean"
     if "pre_norm" in klw_cfg:
         kl_pre_norm = str(klw_cfg.get("pre_norm"))
     else:
-        kl_pre_norm = "none" if kl_target == "final_latent" else "mean"
-    kl_clamp_nonnegative = bool(klw_cfg.get("clamp_nonnegative", kl_target != "final_latent"))
-    if kl_target not in ("latent_intensity", "final_latent"):
-        raise ValueError("loss.kl_w.target must be one of: latent_intensity|final_latent")
+        kl_pre_norm = "mean"
+    kl_clamp_nonnegative = bool(klw_cfg.get("clamp_nonnegative", True))
+    if kl_target not in ("latent_mean", "latent_intensity"):
+        raise ValueError("loss.kl_w.target must be one of: latent_mean|latent_intensity")
 
     mu_list = []
     logvar_list = []
@@ -129,14 +133,9 @@ def main() -> None:
         for x, y in tqdm(test_loader, desc="Extracting map latents", leave=False):
             x = x.to(device, non_blocking=True)
 
-            mu_map, logvar_map = model.encode(x)
-            z_map = model.reparameterize(mu_map, logvar_map)
             if adapter is not None:
-                z_mid, info = adapter(z_map, return_info=True)
-                if kl_target == "final_latent":
-                    latent_for_stats = info["final_latent_map"]
-                else:
-                    latent_for_stats = info["latent_intensity_map"]
+                z_mid, info = adapter.encode_from_input(x, return_info=True, sample_posterior=False)
+                latent_for_stats = info.get("latent_mean_map", info["latent_intensity_map"])
                 recon = model.decode(z_mid)
                 kl_ps = kl_latent_intensity_biased_gaussian(
                     latent_intensity_map=latent_for_stats,
@@ -148,7 +147,10 @@ def main() -> None:
                     clamp_nonnegative=kl_clamp_nonnegative,
                     reduction="none",
                 )
+                logvar_map = torch.full_like(latent_for_stats, math.log(max(kl_var0, 1e-12)))
             else:
+                mu_map, logvar_map = model.encode(x)
+                z_map = model.reparameterize(mu_map, logvar_map)
                 latent_for_stats = mu_map
                 recon = model.decode(z_map)
                 kl_ps = kl_map_gaussian_prior(

@@ -33,6 +33,13 @@ def build_optical_adapter_from_cfg(cfg: dict, model: VAEMapCore) -> OpticalOLSAd
     sensor_cfg = optics_cfg.get("sensor", {})
     resize_hw_cfg = optics_cfg.get("resize_hw", [model.latent_hw[0], model.latent_hw[1]])
     resize_hw = tuple(resize_hw_cfg) if resize_hw_cfg is not None else None
+    diff_cfg = optics_cfg.get("diffractive_layers", {})
+    diff_z_cfg = diff_cfg.get("z_mm", [optics_cfg.get("z1_mm", 20.0), optics_cfg.get("z1_mm", 20.0)])
+    if isinstance(diff_z_cfg, (list, tuple)) and len(diff_z_cfg) == 2:
+        diffraction_z_mm = (float(diff_z_cfg[0]), float(diff_z_cfg[1]))
+    else:
+        raise ValueError("optics.diffractive_layers.z_mm must be a list/tuple of length 2")
+    posterior_sigma_cfg = optics_cfg.get("posterior_sigma", cfg.get("loss", {}).get("posterior_sigma", 0.1))
 
     return OpticalOLSAdapter(
         latent_shape=(model.latent_channels, model.latent_hw[0], model.latent_hw[1]),
@@ -47,6 +54,12 @@ def build_optical_adapter_from_cfg(cfg: dict, model: VAEMapCore) -> OpticalOLSAd
         upsample_factor=int(optics_cfg.get("upsample_factor", 1)),
         scatter_cfg=optics_cfg.get("scatter", {}),
         sensor_cfg=sensor_cfg,
+        diffraction_z_mm=diffraction_z_mm,
+        z_to_scatter_mm=float(optics_cfg.get("z_to_scatter_mm", optics_cfg.get("z2_mm", 20.0))),
+        z_to_sensor_mm=float(optics_cfg.get("z_to_sensor_mm", 1.0)),
+        phase_trainable=bool(diff_cfg.get("trainable", True)),
+        phase_init=str(diff_cfg.get("init", "uniform")),
+        posterior_sigma=float(posterior_sigma_cfg),
     )
 
 
@@ -67,9 +80,7 @@ def evaluate_map_loader(
 
     for x, _ in loader:
         x = x.to(device, non_blocking=True)
-        mu_map, logvar_map = model.encode(x)
-        z_map = model.reparameterize(mu_map, logvar_map)
-        z_mid = adapter(z_map)
+        z_mid = adapter.encode_from_input(x, sample_posterior=False)
         recon = model.decode(z_mid)
 
         mse_per_sample = mse_loss(recon, x, reduction="none")
@@ -93,9 +104,9 @@ def save_optical_stage_visualization(
 ) -> None:
     stages = optics_info.get("stage_intensity_maps", [])
     stage_names = optics_info.get("stage_intensity_names", [])
-    final_latent = optics_info.get("final_latent_map", None)
+    latent_mean = optics_info.get("latent_mean_map", None)
 
-    if len(stages) == 0 or final_latent is None:
+    if len(stages) == 0 or latent_mean is None:
         return
 
     def _prepare_image_row(x: torch.Tensor) -> torch.Tensor:
@@ -129,7 +140,7 @@ def save_optical_stage_visualization(
         _prepare_image_row(inputs),
         _prepare_map_row(field_input, use_log1p=True),
         _prepare_map_row(scatter, use_log1p=True),
-        _prepare_map_row(final_latent, use_log1p=False),
+        _prepare_map_row(latent_mean, use_log1p=True),
     ]
     grid = _stack_rows(rows)
     save_image_grid(grid, path=path, nrow=max_items, out_range="zero_one")
@@ -138,7 +149,7 @@ def save_optical_stage_visualization(
         logger.info(
             "optics.png semantics: 4 rows x %d cols, channel0 only; "
             "rows=[input_image, field_input_intensity(before_propagation), "
-            "scatter_intensity(after_scatter), final_latent_map(input_to_decoder)], cols=samples",
+            "scatter_intensity(after_scatter), latent_mean_map(positive_mu_for_decoder_sampling)], cols=samples",
             max_items,
         )
 
@@ -169,16 +180,18 @@ def save_epoch_visuals_optical(
     optics_dir: Path,
     device: torch.device,
     sample_apply_smooth: bool = False,
-    sample_prior_space: str = "z_map",
+    sample_prior_space: str = "decoder",
     decoder_prior_cfg: Optional[dict] = None,
     logger=None,
 ) -> None:
     model.eval()
     adapter.eval()
 
-    mu_fixed, logvar_fixed = model.encode(fixed_inputs)
-    z_fixed = model.reparameterize(mu_fixed, logvar_fixed)
-    z_fixed_mid, info_fixed = adapter(z_fixed, return_info=True)
+    z_fixed_mid, info_fixed = adapter.encode_from_input(
+        fixed_inputs,
+        return_info=True,
+        sample_posterior=False,
+    )
     recon_fixed = model.decode(z_fixed_mid)
 
     save_reconstruction_comparison(
@@ -199,26 +212,17 @@ def save_epoch_visuals_optical(
     )
 
     sample_prior_space = str(sample_prior_space).lower()
-    if sample_prior_space == "decoder":
-        z_mid_prior = sample_map_prior(
-            batch_size=64,
-            latent_channels=model.latent_channels,
-            latent_hw=model.latent_hw,
-            prior_cfg=decoder_prior_cfg or prior_cfg,
-            device=device,
-            apply_smooth=sample_apply_smooth,
-        )
-        sampled = model.decode(z_mid_prior)
-    else:
-        z_prior = sample_map_prior(
-            batch_size=64,
-            latent_channels=model.latent_channels,
-            latent_hw=model.latent_hw,
-            prior_cfg=prior_cfg,
-            device=device,
-            apply_smooth=sample_apply_smooth,
-        )
-        sampled = model.decode(adapter(z_prior))
+    if sample_prior_space not in ("decoder", "auto"):
+        raise ValueError("Optical sampling should use decoder prior; got {}".format(sample_prior_space))
+    z_mid_prior = sample_map_prior(
+        batch_size=64,
+        latent_channels=model.latent_channels,
+        latent_hw=model.latent_hw,
+        prior_cfg=decoder_prior_cfg or prior_cfg,
+        device=device,
+        apply_smooth=sample_apply_smooth,
+    )
+    sampled = model.decode(z_mid_prior)
     save_image_grid(sampled, path=sample_dir / "epoch_{:03d}_sample.png".format(epoch), nrow=8, out_range=out_range)
 
     interp_batch = next(iter(val_loader))[0]
@@ -227,12 +231,13 @@ def save_epoch_visuals_optical(
 
     idx = torch.randperm(interp_batch.size(0))[:2]
     pair = interp_batch[idx].to(device)
-    mu_pair, _ = model.encode(pair)
+    _, pair_info = adapter.encode_from_input(pair, return_info=True, sample_posterior=False)
+    mu_pair = pair_info["latent_mean_map"]
     z1, z2 = mu_pair[0:1], mu_pair[1:2]
 
     alphas = torch.linspace(0.0, 1.0, steps=10, device=device).view(10, 1, 1, 1)
     z_interp = z1 * (1.0 - alphas) + z2 * alphas
-    interp_images = model.decode(adapter(z_interp))
+    interp_images = model.decode(z_interp)
     save_image_grid(
         interp_images,
         path=interp_dir / "epoch_{:03d}_interp.png".format(epoch),

@@ -27,6 +27,8 @@ loss:
   alpha: 1.0
   beta: 1.0
   gamma: 0.1
+  # sigma of q(w|x)=N(mu_w, sigma^2 I), fixed (not learned)
+  posterior_sigma: 0.10
   prior:
     type: biased_gaussian
     mu0: 0.25
@@ -38,14 +40,11 @@ loss:
   optical_penalty:
     mode: tv
   kl_w:
-    # KL target space:
-    # - final_latent: decoder input (recommended for sampling consistency)
-    # - latent_intensity: optical intensity w
-    target: final_latent
+    # KL is applied on optical latent mean mu_w (after scattering+detect+pool).
+    target: latent_mean
     var_mode: constant
-    # if omitted, train_map_optical uses var0 = prior_sigma0^2 by default.
-    var0: 1.0
-    # With pre_norm=mean, m0=1.0 is a natural centered choice.
+    # If omitted, var0 defaults to posterior_sigma^2.
+    # var0: 0.01
     m0: 1.0
     prior_sigma0: 1.0
     pre_norm: mean
@@ -53,12 +52,18 @@ loss:
 
 optics:
   field_init_mode: real
-  resize_hw: [80, 80]
+  # Two diffractive phase layers are simulated on a 200x200 grid (8um pitch).
+  resize_hw: [200, 200]
   # NOTE: pad/unpad is handled only inside angular_spectrum_propagate.
   wavelength_nm: 532.0
   pixel_pitch_um: 8.0
-  z1_mm: 20.0
-  z2_mm: 20.0
+  diffractive_layers:
+    z_mm: [20.0, 20.0]
+    trainable: true
+    init: uniform
+  z_to_scatter_mm: 20.0
+  z_to_sensor_mm: 1.0
+  posterior_sigma: 0.10
   pad_factor: 2.0
   bandlimit: true
   upsample_factor: 1
@@ -71,9 +76,9 @@ optics:
     # No ROI crop / no extra interpolation: intensity -> pooling -> latent.
     pool_type: avg
     # If you want no pooling, set pool_type: none and make latent_hw == resize_hw.
-    # 80x80 field -> 10x10 latent in one step.
-    pool_kernel: 8
-    pool_stride: 8
+    # 200x200 field -> 10x10 latent in one step.
+    pool_kernel: 20
+    pool_stride: 20
     # mean: block average; sum: block integral (ablation).
     pool_reduce: mean
 

@@ -65,6 +65,7 @@ def main() -> None:
     loss_cfg = cfg.get("loss", {})
     prior_cfg = loss_cfg.get("prior", {"type": "biased_gaussian", "mu0": 0.25, "sigma": 1.0})
     klw_cfg = loss_cfg.get("kl_w", {})
+    optics_cfg = cfg.get("optics", {})
 
     seed = int(train_cfg.get("seed", 42))
     set_seed(seed)
@@ -103,25 +104,42 @@ def main() -> None:
 
     model = build_map_core_from_cfg(cfg, dataset_info).to(device)
     adapter = build_optical_adapter_from_cfg(cfg, model).to(device)
-
-    optics_cfg = cfg.get("optics", {})
+    # Optical mode uses optical encoder + electronic decoder.
+    for p in model.encoder.parameters():
+        p.requires_grad = False
+    for p in model.enc_to_mu.parameters():
+        p.requires_grad = False
+    for p in model.enc_to_logvar.parameters():
+        p.requires_grad = False
     scatter_cfg = optics_cfg.get("scatter", {})
     sensor_cfg = optics_cfg.get("sensor", {})
+    diff_cfg = optics_cfg.get("diffractive_layers", {})
+    diff_z_cfg = diff_cfg.get("z_mm", [optics_cfg.get("z1_mm", 20.0), optics_cfg.get("z1_mm", 20.0)])
     resize_hw_cfg = optics_cfg.get("resize_hw", [model.latent_hw[0], model.latent_hw[1]])
     resize_hw_display = tuple(resize_hw_cfg) if resize_hw_cfg is not None else None
     logger.info(
-        "Optics | field_init_mode=%s scatter_type=%s scatter.static=%s resize_hw=%s pad_factor=%s bandlimit=%s upsample_factor=%s",
+        "Optics | field_init_mode=%s resize_hw=%s pixel_pitch_um=%.3f wavelength_nm=%.1f pad_factor=%s bandlimit=%s upsample_factor=%s",
         str(optics_cfg.get("field_init_mode", "real")),
-        str(scatter_cfg.get("type", "iid_phase")),
-        bool(getattr(adapter.scatterer, "static", scatter_cfg.get("static", True))),
         resize_hw_display,
+        float(optics_cfg.get("pixel_pitch_um", 8.0)),
+        float(optics_cfg.get("wavelength_nm", 532.0)),
         float(optics_cfg.get("pad_factor", 2.0)),
         bool(optics_cfg.get("bandlimit", True)),
         int(optics_cfg.get("upsample_factor", 1)),
     )
     logger.info(
-        "Sensor | resize_hw=%s latent_hw=%s pool_type=%s pool_kernel=%s pool_stride=%s pool_reduce=%s",
-        resize_hw_display,
+        "DiffractiveEncoder | phase_layers=2 trainable=%s init=%s z_mm=%s z_to_scatter_mm=%s z_to_sensor_mm=%s posterior_sigma=%s",
+        bool(diff_cfg.get("trainable", True)),
+        str(diff_cfg.get("init", "uniform")),
+        tuple(diff_z_cfg),
+        float(optics_cfg.get("z_to_scatter_mm", optics_cfg.get("z2_mm", 20.0))),
+        float(optics_cfg.get("z_to_sensor_mm", 1.0)),
+        float(optics_cfg.get("posterior_sigma", loss_cfg.get("posterior_sigma", 0.1))),
+    )
+    logger.info(
+        "Scatter+Sensor | scatter_type=%s scatter.static=%s latent_hw=%s pool_type=%s pool_kernel=%s pool_stride=%s pool_reduce=%s",
+        str(scatter_cfg.get("type", "iid_phase")),
+        bool(getattr(adapter.scatterer, "static", scatter_cfg.get("static", True))),
         tuple(model.latent_hw),
         str(sensor_cfg.get("pool_type", "avg")),
         sensor_cfg.get("pool_kernel", 2),
@@ -131,34 +149,37 @@ def main() -> None:
 
     trainable_params = count_trainable_params(model) + count_trainable_params(adapter)
     logger.info("Trainable parameters: %d", trainable_params)
+    logger.info("Model trainable modules: decoder + optical adapter (encoder frozen)")
 
-    optimizer = optim.Adam(list(model.parameters()) + list(adapter.parameters()), lr=float(train_cfg.get("lr", 1e-3)))
+    train_params = [p for p in model.parameters() if p.requires_grad] + [p for p in adapter.parameters() if p.requires_grad]
+    optimizer = optim.Adam(train_params, lr=float(train_cfg.get("lr", 1e-3)))
 
     alpha = float(loss_cfg.get("alpha", 1.0))
     beta = float(loss_cfg.get("beta", 1.0))
     gamma = float(loss_cfg.get("gamma", 0.1))
     penalty_mode = str(loss_cfg.get("optical_penalty", {}).get("mode", "tv"))
+    posterior_sigma = float(loss_cfg.get("posterior_sigma", optics_cfg.get("posterior_sigma", 0.1)))
+    if posterior_sigma < 0:
+        raise ValueError("loss.posterior_sigma must be >= 0")
 
     kl_var_mode = str(klw_cfg.get("var_mode", "constant"))
-    kl_target = str(klw_cfg.get("target", "final_latent")).lower()
-    if kl_target not in ("latent_intensity", "final_latent"):
-        raise ValueError("loss.kl_w.target must be one of: latent_intensity|final_latent")
+    kl_target = str(klw_cfg.get("target", "latent_mean")).lower()
+    if kl_target == "final_latent":
+        kl_target = "latent_mean"
+    if kl_target not in ("latent_mean", "latent_intensity"):
+        raise ValueError("loss.kl_w.target must be one of: latent_mean|latent_intensity")
     kl_m0 = float(klw_cfg.get("m0", prior_cfg.get("mu0", 0.25)))
     kl_prior_sigma0 = float(klw_cfg.get("prior_sigma0", prior_cfg.get("sigma", 1.0)))
-    kl_pre_norm = str(klw_cfg.get("pre_norm", "none" if kl_target == "final_latent" else "mean"))
-    kl_var0 = float(klw_cfg.get("var0", kl_prior_sigma0 * kl_prior_sigma0))
-    kl_clamp_nonnegative = bool(klw_cfg.get("clamp_nonnegative", kl_target != "final_latent"))
+    kl_pre_norm = str(klw_cfg.get("pre_norm", "mean"))
+    kl_var0 = float(klw_cfg.get("var0", posterior_sigma * posterior_sigma if posterior_sigma > 0 else 1e-8))
+    kl_clamp_nonnegative = bool(klw_cfg.get("clamp_nonnegative", True))
 
     sample_apply_smooth_in_train = bool(prior_cfg.get("apply_smooth_in_train", False))
-    sample_prior_space = str(cfg.get("sample", {}).get("prior_space", "auto")).lower()
-    if sample_prior_space == "auto":
-        sample_prior_space = "decoder" if kl_target == "final_latent" else "z_map"
-    if sample_prior_space not in ("decoder", "z_map"):
-        raise ValueError("sample.prior_space must be one of: auto|decoder|z_map")
+    sample_prior_space = "decoder"
     decoder_prior_cfg = build_decoder_prior_cfg(prior_cfg=prior_cfg, klw_cfg=klw_cfg)
 
     logger.info(
-        "KL_w | target=%s var_mode=%s var0=%.6f M0=%.6f prior_sigma0=%.6f pre_norm=%s clamp_nonnegative=%s",
+        "KL_w | target=%s var_mode=%s var0=%.6f M0=%.6f prior_sigma0=%.6f pre_norm=%s clamp_nonnegative=%s posterior_sigma=%s",
         kl_target,
         kl_var_mode,
         kl_var0,
@@ -166,6 +187,7 @@ def main() -> None:
         kl_prior_sigma0,
         kl_pre_norm,
         kl_clamp_nonnegative,
+        posterior_sigma,
     )
     logger.info("Sampling | prior_space=%s", sample_prior_space)
 
@@ -197,9 +219,12 @@ def main() -> None:
             x = x.to(device, non_blocking=True)
             optimizer.zero_grad(set_to_none=True)
 
-            mu_map, logvar_map = model.encode(x)
-            z_map = model.reparameterize(mu_map, logvar_map)
-            z_mid, optics_info = adapter(z_map, return_info=True)
+            z_mid, optics_info = adapter.encode_from_input(
+                x,
+                return_info=True,
+                sample_posterior=True,
+                posterior_sigma=posterior_sigma,
+            )
             recon = model.decode(z_mid)
 
             if not torch.isfinite(recon).all():
@@ -207,7 +232,7 @@ def main() -> None:
 
             recon_per_sample = compute_recon_per_sample(recon, x, recon_loss_type)
             latent_intensity_map = optics_info["latent_intensity_map"]
-            kl_input_map = optics_info["final_latent_map"] if kl_target == "final_latent" else latent_intensity_map
+            kl_input_map = optics_info.get("latent_mean_map", latent_intensity_map)
 
             kl_per_sample = kl_latent_intensity_biased_gaussian(
                 latent_intensity_map=kl_input_map,

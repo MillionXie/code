@@ -91,9 +91,12 @@ def main() -> None:
     with torch.no_grad():
         for x, _ in tqdm(test_loader, desc="Evaluating", leave=False):
             x = x.to(device, non_blocking=True)
-            mu_map, logvar_map = model.encode(x)
-            z_map = model.reparameterize(mu_map, logvar_map)
-            z_mid = adapter(z_map)
+            if args.mode == "optical":
+                z_mid = adapter.encode_from_input(x, sample_posterior=False)
+            else:
+                mu_map, logvar_map = model.encode(x)
+                z_map = model.reparameterize(mu_map, logvar_map)
+                z_mid = adapter(z_map)
             recon = model.decode(z_mid)
 
             mse_ps = mse_loss(recon, x, reduction="none")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -26,8 +27,10 @@ class IdentityAdapter(nn.Module):
 
 class OpticalOLSAdapter(nn.Module):
     """
-    Optical latent adapter pipeline:
-    resize -> propagate -> scatter -> propagate -> detect intensity -> optional pooling -> decoder latent map.
+    Optical latent encoder pipeline:
+    image/feature -> resize -> (prop + phase)x2 -> propagate -> static scatter ->
+    short propagate -> detect intensity -> optional pooling -> latent mean mu_w (nonnegative)
+    -> sample z_w = mu_w + sigma * eps with fixed sigma.
     """
 
     def __init__(
@@ -44,6 +47,12 @@ class OpticalOLSAdapter(nn.Module):
         upsample_factor: int = 1,
         scatter_cfg: Optional[Dict[str, Any]] = None,
         sensor_cfg: Optional[Dict[str, Any]] = None,
+        diffraction_z_mm: Optional[Tuple[float, float]] = None,
+        z_to_scatter_mm: Optional[float] = None,
+        z_to_sensor_mm: float = 1.0,
+        phase_trainable: bool = True,
+        phase_init: str = "uniform",
+        posterior_sigma: float = 0.1,
     ):
         super().__init__()
         self.latent_channels, self.latent_h, self.latent_w = latent_shape
@@ -52,11 +61,27 @@ class OpticalOLSAdapter(nn.Module):
 
         self.wavelength_nm = float(wavelength_nm)
         self.pixel_pitch_um = float(pixel_pitch_um)
-        self.z1_mm = float(z1_mm)
-        self.z2_mm = float(z2_mm)
+        if self.resize_hw is None:
+            self.resize_hw = (self.latent_h, self.latent_w)
+        self.field_h, self.field_w = int(self.resize_hw[0]), int(self.resize_hw[1])
+        if self.field_h <= 0 or self.field_w <= 0:
+            raise ValueError("resize_hw must be positive, got {}".format(self.resize_hw))
+
+        if diffraction_z_mm is None:
+            self.diffraction_z_mm = (float(z1_mm), float(z1_mm))
+        else:
+            if len(diffraction_z_mm) != 2:
+                raise ValueError("diffraction_z_mm must contain 2 distances, got {}".format(len(diffraction_z_mm)))
+            self.diffraction_z_mm = (float(diffraction_z_mm[0]), float(diffraction_z_mm[1]))
+
+        self.z_to_scatter_mm = float(z2_mm if z_to_scatter_mm is None else z_to_scatter_mm)
+        self.z_to_sensor_mm = float(z_to_sensor_mm)
         self.pad_factor = float(pad_factor)
         self.bandlimit = bool(bandlimit)
         self.upsample_factor = int(max(1, upsample_factor))
+        self.posterior_sigma = float(posterior_sigma)
+        if self.posterior_sigma < 0:
+            raise ValueError("posterior_sigma must be >= 0")
 
         scatter_cfg = scatter_cfg or {"type": "iid_phase"}
         sensor_cfg = sensor_cfg or {}
@@ -76,9 +101,36 @@ class OpticalOLSAdapter(nn.Module):
             expected_hw=(self.latent_h, self.latent_w),
         )
 
+        self.phase_trainable = bool(phase_trainable)
+        self.phase_init = str(phase_init).lower()
+        phase_params = []
+        for _ in range(2):
+            if self.phase_init in ("uniform", "random"):
+                init = torch.rand(1, 1, self.field_h, self.field_w) * (2.0 * math.pi)
+            elif self.phase_init in ("zeros", "zero"):
+                init = torch.zeros(1, 1, self.field_h, self.field_w)
+            else:
+                raise ValueError("Unsupported phase_init: {}".format(self.phase_init))
+            phase_params.append(nn.Parameter(init, requires_grad=self.phase_trainable))
+        self.phase_masks = nn.ParameterList(phase_params)
+
+    def _align_input_channels(self, x: torch.Tensor) -> torch.Tensor:
+        c_in = x.shape[1]
+        if c_in == self.latent_channels:
+            return x
+        if self.latent_channels == 1:
+            return x.mean(dim=1, keepdim=True)
+        if c_in == 1:
+            return x.repeat(1, self.latent_channels, 1, 1)
+        if c_in > self.latent_channels:
+            return x[:, : self.latent_channels]
+        pad = self.latent_channels - c_in
+        zeros = torch.zeros(x.shape[0], pad, x.shape[2], x.shape[3], device=x.device, dtype=x.dtype)
+        return torch.cat([x, zeros], dim=1)
+
     def _to_complex_field(self, z_map: torch.Tensor) -> torch.Tensor:
         if self.field_init_mode == "real":
-            real = z_map
+            real = torch.clamp(z_map, min=0.0)
         elif self.field_init_mode == "sqrt_positive":
             real = torch.sqrt(torch.clamp(z_map, min=0.0) + 1e-8)
         else:
@@ -92,64 +144,129 @@ class OpticalOLSAdapter(nn.Module):
         imag = F.interpolate(E.imag, size=target_hw, mode="bilinear", align_corners=False)
         return torch.complex(real, imag)
 
-    def forward(self, z_map: torch.Tensor, return_info: bool = False):
-        E0 = self._to_complex_field(z_map)
+    def _run_optical_pipeline(self, field_map: torch.Tensor, return_info: bool = False):
+        E0 = self._to_complex_field(field_map)
         E0 = self._resize_field(E0, self.resize_hw)
-
         I0 = detect_intensity(E0)
 
-        E1 = angular_spectrum_propagate(
-            E_complex=E0,
+        stage_names = ["field_input"]
+        stage_maps = [I0]
+
+        E = E0
+        for idx, z_mm in enumerate(self.diffraction_z_mm):
+            E = angular_spectrum_propagate(
+                E_complex=E,
+                wavelength_nm=self.wavelength_nm,
+                pixel_pitch_um=self.pixel_pitch_um,
+                z_mm=z_mm,
+                pad_factor=self.pad_factor,
+                bandlimit=self.bandlimit,
+                upsample_factor=self.upsample_factor,
+            )
+            phase = self.phase_masks[idx]
+            phase_mask = torch.exp(1j * phase).to(E.dtype)
+            E = E * phase_mask
+            stage_names.append("diff{}".format(idx + 1))
+            stage_maps.append(detect_intensity(E))
+
+        E = angular_spectrum_propagate(
+            E_complex=E,
             wavelength_nm=self.wavelength_nm,
             pixel_pitch_um=self.pixel_pitch_um,
-            z_mm=self.z1_mm,
+            z_mm=self.z_to_scatter_mm,
             pad_factor=self.pad_factor,
             bandlimit=self.bandlimit,
             upsample_factor=self.upsample_factor,
         )
-        I1 = detect_intensity(E1)
+        E = self.scatterer(E)
+        I_scatter = detect_intensity(E)
+        stage_names.append("scatter")
+        stage_maps.append(I_scatter)
 
-        E2 = self.scatterer(E1)
-        I2 = detect_intensity(E2)
-
-        E3 = angular_spectrum_propagate(
-            E_complex=E2,
+        E = angular_spectrum_propagate(
+            E_complex=E,
             wavelength_nm=self.wavelength_nm,
             pixel_pitch_um=self.pixel_pitch_um,
-            z_mm=self.z2_mm,
+            z_mm=self.z_to_sensor_mm,
             pad_factor=self.pad_factor,
             bandlimit=self.bandlimit,
             upsample_factor=self.upsample_factor,
         )
-        I3 = detect_intensity(E3)
+        I_sensor = detect_intensity(E)
+        stage_names.append("sensor")
+        stage_maps.append(I_sensor)
 
-        latent_map, sensor_info = self.sensor(I3, return_info=True)
-        latent_intensity_map = sensor_info["latent_intensity_map"]
+        latent_mean_map, sensor_info = self.sensor(I_sensor, return_info=True)
+        latent_mean_map = torch.clamp(latent_mean_map, min=0.0)
 
-        if latent_intensity_map.shape[1] != self.latent_channels:
+        if latent_mean_map.shape[1] != self.latent_channels:
             raise ValueError(
                 "Optical latent intensity channel mismatch: got {}, expected {}".format(
-                    latent_intensity_map.shape[1], self.latent_channels
+                    latent_mean_map.shape[1], self.latent_channels
                 )
             )
 
-        final_latent_map = latent_map
-
-        if final_latent_map.shape[1] != self.latent_channels:
-            raise ValueError(
-                "Optical adapter channel mismatch: got {}, expected {}".format(final_latent_map.shape[1], self.latent_channels)
-            )
-
         if return_info:
-            return final_latent_map, {
-                "stage_intensity_names": ["field_input", "prop1", "scatter", "prop2", "latent"],
-                "stage_intensity_maps": [I0, I1, I2, I3, latent_intensity_map],
-                "latent_intensity_map": latent_intensity_map,
-                "final_latent_map": final_latent_map,
+            return latent_mean_map, {
+                "stage_intensity_names": stage_names + ["latent_mean"],
+                "stage_intensity_maps": stage_maps + [latent_mean_map],
+                "latent_intensity_map": latent_mean_map,
+                "latent_mean_map": latent_mean_map,
                 "sensor": sensor_info,
             }
+        return latent_mean_map
 
-        return final_latent_map
+    def _sample_latent(self, latent_mean_map: torch.Tensor, sample_posterior: bool, posterior_sigma: Optional[float]) -> Tuple[torch.Tensor, float]:
+        sigma = self.posterior_sigma if posterior_sigma is None else float(posterior_sigma)
+        if sigma < 0:
+            raise ValueError("posterior_sigma must be >= 0")
+        if not sample_posterior or sigma == 0.0:
+            return latent_mean_map, sigma
+        eps = torch.randn_like(latent_mean_map)
+        return latent_mean_map + sigma * eps, sigma
+
+    def encode_from_input(
+        self,
+        x: torch.Tensor,
+        return_info: bool = False,
+        sample_posterior: bool = True,
+        posterior_sigma: Optional[float] = None,
+    ):
+        field_map = self._align_input_channels(x)
+        latent_mean_map, info = self._run_optical_pipeline(field_map, return_info=True)
+        latent_sample_map, sigma = self._sample_latent(
+            latent_mean_map=latent_mean_map,
+            sample_posterior=sample_posterior,
+            posterior_sigma=posterior_sigma,
+        )
+        if return_info:
+            info.update(
+                {
+                    "field_input_map": field_map,
+                    "posterior_sigma": sigma,
+                    "final_latent_map": latent_sample_map,
+                }
+            )
+            return latent_sample_map, info
+        return latent_sample_map
+
+    def forward(
+        self,
+        z_map: torch.Tensor,
+        return_info: bool = False,
+        sample_posterior: bool = False,
+        posterior_sigma: Optional[float] = None,
+    ):
+        latent_mean_map, info = self._run_optical_pipeline(z_map, return_info=True)
+        latent_sample_map, sigma = self._sample_latent(
+            latent_mean_map=latent_mean_map,
+            sample_posterior=sample_posterior,
+            posterior_sigma=posterior_sigma,
+        )
+        if return_info:
+            info.update({"posterior_sigma": sigma, "final_latent_map": latent_sample_map})
+            return latent_sample_map, info
+        return latent_sample_map
 
 
 __all__ = ["IdentityAdapter", "OpticalOLSAdapter"]

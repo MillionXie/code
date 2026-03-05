@@ -61,12 +61,10 @@ def main() -> None:
     loss_cfg = cfg.get("loss", {})
     prior_cfg = loss_cfg.get("prior", {"type": "biased_gaussian", "mu0": 0.25, "sigma": 1.0})
     klw_cfg = loss_cfg.get("kl_w", {})
-    kl_target = str(klw_cfg.get("target", "final_latent")).lower()
-    sample_prior_space = str(cfg.get("sample", {}).get("prior_space", "auto")).lower()
-    if sample_prior_space == "auto":
-        sample_prior_space = "decoder" if kl_target == "final_latent" else "z_map"
-    if sample_prior_space not in ("decoder", "z_map"):
-        raise ValueError("sample.prior_space must be one of: auto|decoder|z_map")
+    kl_target = str(klw_cfg.get("target", "latent_mean")).lower()
+    if kl_target == "final_latent":
+        kl_target = "latent_mean"
+    sample_prior_space = "decoder"
 
     decoder_prior_cfg = {
         "type": "biased_gaussian",
@@ -76,27 +74,15 @@ def main() -> None:
     }
 
     with torch.no_grad():
-        if sample_prior_space == "decoder":
-            z_mid = sample_map_prior(
-                batch_size=args.n_samples,
-                latent_channels=model.latent_channels,
-                latent_hw=model.latent_hw,
-                prior_cfg=decoder_prior_cfg,
-                device=device,
-                apply_smooth=True,
-            )
-            samples = model.decode(z_mid)
-        else:
-            z_map = sample_map_prior(
-                batch_size=args.n_samples,
-                latent_channels=model.latent_channels,
-                latent_hw=model.latent_hw,
-                prior_cfg=prior_cfg,
-                device=device,
-                apply_smooth=True,
-            )
-            z_mid = adapter(z_map)
-            samples = model.decode(z_mid)
+        z_mid = sample_map_prior(
+            batch_size=args.n_samples,
+            latent_channels=model.latent_channels,
+            latent_hw=model.latent_hw,
+            prior_cfg=decoder_prior_cfg,
+            device=device,
+            apply_smooth=True,
+        )
+        samples = model.decode(z_mid)
 
     sample_path = outdir / "samples.png"
     save_image_grid(
