@@ -273,4 +273,151 @@ class OpticalOLSAdapter(nn.Module):
         return latent_sample_map
 
 
-__all__ = ["IdentityAdapter", "OpticalOLSAdapter"]
+class OpticalDiffractionDecoder(nn.Module):
+    """
+    Pure optical decoder:
+    latent intensity map -> complex field -> (prop + phase)xN -> sensor intensity -> reconstructed image.
+    """
+
+    def __init__(
+        self,
+        latent_shape: Tuple[int, int, int],
+        out_channels: int,
+        output_hw: Tuple[int, int],
+        field_hw: Optional[Tuple[int, int]],
+        field_init_mode: str,
+        wavelength_nm: float,
+        pixel_pitch_um: float,
+        layer_z_mm: Tuple[float, float, float, float],
+        z_to_sensor_mm: float,
+        pad_factor: float,
+        bandlimit: bool = True,
+        upsample_factor: int = 1,
+        phase_trainable: bool = True,
+        phase_init: str = "uniform",
+        out_range: str = "zero_one",
+    ):
+        super().__init__()
+        self.latent_channels, self.latent_h, self.latent_w = latent_shape
+        self.out_channels = int(out_channels)
+        self.output_hw = (int(output_hw[0]), int(output_hw[1]))
+        self.field_hw = field_hw if field_hw is not None else self.output_hw
+        self.field_hw = (int(self.field_hw[0]), int(self.field_hw[1]))
+        self.field_init_mode = str(field_init_mode).lower()
+        self.wavelength_nm = float(wavelength_nm)
+        self.pixel_pitch_um = float(pixel_pitch_um)
+        self.layer_z_mm = tuple(float(z) for z in layer_z_mm)
+        self.z_to_sensor_mm = float(z_to_sensor_mm)
+        self.pad_factor = float(pad_factor)
+        self.bandlimit = bool(bandlimit)
+        self.upsample_factor = int(max(1, upsample_factor))
+        self.out_range = str(out_range)
+        self.phase_trainable = bool(phase_trainable)
+        self.phase_init = str(phase_init).lower()
+
+        phase_params = []
+        for _ in range(len(self.layer_z_mm)):
+            if self.phase_init in ("uniform", "random"):
+                init = torch.rand(1, 1, self.field_hw[0], self.field_hw[1]) * (2.0 * math.pi)
+            elif self.phase_init in ("zeros", "zero"):
+                init = torch.zeros(1, 1, self.field_hw[0], self.field_hw[1])
+            else:
+                raise ValueError("Unsupported phase_init: {}".format(self.phase_init))
+            phase_params.append(nn.Parameter(init, requires_grad=self.phase_trainable))
+        self.phase_masks = nn.ParameterList(phase_params)
+
+        # Monotonic intensity-to-image mapping without convolution.
+        self.log_gain = nn.Parameter(torch.tensor(0.0))
+        self.bias = nn.Parameter(torch.tensor(0.0))
+
+    def _resize_field(self, E: torch.Tensor, target_hw: Tuple[int, int]) -> torch.Tensor:
+        if E.shape[-2:] == target_hw:
+            return E
+        real = F.interpolate(E.real, size=target_hw, mode="bilinear", align_corners=False)
+        imag = F.interpolate(E.imag, size=target_hw, mode="bilinear", align_corners=False)
+        return torch.complex(real, imag)
+
+    def _align_channels(self, x: torch.Tensor, target_channels: int) -> torch.Tensor:
+        c_in = x.shape[1]
+        if c_in == target_channels:
+            return x
+        if c_in == 1 and target_channels > 1:
+            return x.repeat(1, target_channels, 1, 1)
+        if c_in > target_channels:
+            return x[:, :target_channels]
+        pad = target_channels - c_in
+        zeros = torch.zeros(x.shape[0], pad, x.shape[2], x.shape[3], device=x.device, dtype=x.dtype)
+        return torch.cat([x, zeros], dim=1)
+
+    def _latent_to_complex(self, z_latent: torch.Tensor) -> torch.Tensor:
+        z_latent = self._align_channels(z_latent, self.latent_channels)
+        if self.field_init_mode in ("sqrt_positive", "sqrt"):
+            amp = torch.sqrt(torch.clamp(z_latent, min=0.0) + 1e-8)
+        elif self.field_init_mode == "real":
+            amp = z_latent
+        else:
+            raise ValueError("Unsupported decoder field_init_mode: {}".format(self.field_init_mode))
+        return torch.complex(amp, torch.zeros_like(amp))
+
+    def _intensity_to_output(self, intensity: torch.Tensor) -> torch.Tensor:
+        gain = torch.exp(self.log_gain).to(dtype=intensity.dtype, device=intensity.device)
+        x = gain * intensity + self.bias.to(dtype=intensity.dtype, device=intensity.device)
+        if self.out_range == "zero_one":
+            return torch.sigmoid(x)
+        if self.out_range == "neg_one_one":
+            return torch.tanh(x)
+        raise ValueError("Unsupported out_range: {}".format(self.out_range))
+
+    def forward(self, z_latent: torch.Tensor, return_info: bool = False):
+        E = self._latent_to_complex(z_latent)
+        E = self._resize_field(E, self.field_hw)
+
+        stage_names = []
+        stage_maps = []
+        for idx, z_mm in enumerate(self.layer_z_mm):
+            E = angular_spectrum_propagate(
+                E_complex=E,
+                wavelength_nm=self.wavelength_nm,
+                pixel_pitch_um=self.pixel_pitch_um,
+                z_mm=float(z_mm),
+                pad_factor=self.pad_factor,
+                bandlimit=self.bandlimit,
+                upsample_factor=self.upsample_factor,
+            )
+            phase = self.phase_masks[idx]
+            phase_mask = torch.exp(1j * phase).to(E.dtype)
+            E = E * phase_mask
+            stage_names.append("dec_diff{}".format(idx + 1))
+            stage_maps.append(detect_intensity(E))
+
+        E = angular_spectrum_propagate(
+            E_complex=E,
+            wavelength_nm=self.wavelength_nm,
+            pixel_pitch_um=self.pixel_pitch_um,
+            z_mm=self.z_to_sensor_mm,
+            pad_factor=self.pad_factor,
+            bandlimit=self.bandlimit,
+            upsample_factor=self.upsample_factor,
+        )
+        I_sensor = detect_intensity(E)
+        stage_names.append("dec_sensor")
+        stage_maps.append(I_sensor)
+
+        x_hat = self._intensity_to_output(I_sensor)
+        x_hat = self._align_channels(x_hat, self.out_channels)
+        if x_hat.shape[-2:] != self.output_hw:
+            x_hat = F.interpolate(x_hat, size=self.output_hw, mode="bilinear", align_corners=False)
+
+        if return_info:
+            return x_hat, {
+                "stage_intensity_names": stage_names,
+                "stage_intensity_maps": stage_maps,
+                "recon_intensity": I_sensor,
+            }
+        return x_hat
+
+    def decode(self, z_latent: torch.Tensor, return_info: bool = False):
+        return self.forward(z_latent, return_info=return_info)
+
+
+__all__ = ["IdentityAdapter", "OpticalOLSAdapter", "OpticalDiffractionDecoder"]

@@ -6,14 +6,46 @@ from typing import Optional
 import torch
 import torch.optim as optim
 
-from models import OpticalOLSAdapter, VAEMapCore
+from models import OpticalDiffractionDecoder, OpticalOLSAdapter, VAEMapCore
 from utils.losses_optical import sample_map_prior
 from utils.metrics import mse_loss, psnr_from_mse
 from utils.viz import save_image_grid, save_reconstruction_comparison
 
 
-def build_map_core_from_cfg(cfg: dict, dataset_info: dict) -> VAEMapCore:
+def build_map_core_from_cfg(cfg: dict, dataset_info: dict):
     model_cfg = cfg.get("model", {})
+    model_arch = str(model_cfg.get("arch", "conv")).lower()
+    if model_arch in ("pure_optical", "optical_only", "optical"):
+        optics_cfg = cfg.get("optics", {})
+        dec_cfg = optics_cfg.get("decoder", {})
+        latent_shape = (
+            int(model_cfg.get("latent_channels", 16)),
+            int(model_cfg.get("latent_hw", [4, 4])[0]),
+            int(model_cfg.get("latent_hw", [4, 4])[1]),
+        )
+        resize_hw_cfg = dec_cfg.get("resize_hw", optics_cfg.get("resize_hw", dataset_info["image_size"]))
+        field_hw = tuple(resize_hw_cfg) if resize_hw_cfg is not None else tuple(dataset_info["image_size"])
+        layer_z_cfg = dec_cfg.get("layer_z_mm", [20.0, 20.0, 20.0, 20.0])
+        if not isinstance(layer_z_cfg, (list, tuple)) or len(layer_z_cfg) != 4:
+            raise ValueError("optics.decoder.layer_z_mm must be list/tuple length 4")
+        return OpticalDiffractionDecoder(
+            latent_shape=latent_shape,
+            out_channels=int(dataset_info["in_channels"]),
+            output_hw=tuple(dataset_info["image_size"]),
+            field_hw=field_hw,
+            field_init_mode=str(dec_cfg.get("field_init_mode", "sqrt_positive")),
+            wavelength_nm=float(optics_cfg.get("wavelength_nm", 532.0)),
+            pixel_pitch_um=float(optics_cfg.get("pixel_pitch_um", 8.0)),
+            layer_z_mm=tuple(float(z) for z in layer_z_cfg),
+            z_to_sensor_mm=float(dec_cfg.get("z_to_sensor_mm", 20.0)),
+            pad_factor=float(optics_cfg.get("pad_factor", 2.0)),
+            bandlimit=bool(optics_cfg.get("bandlimit", True)),
+            upsample_factor=int(optics_cfg.get("upsample_factor", 1)),
+            phase_trainable=bool(dec_cfg.get("trainable", True)),
+            phase_init=str(dec_cfg.get("init", "uniform")),
+            out_range=str(cfg.get("data", {}).get("out_range", "zero_one")),
+        )
+
     return VAEMapCore(
         in_channels=int(dataset_info["in_channels"]),
         input_size=tuple(dataset_info["image_size"]),
@@ -65,7 +97,7 @@ def build_optical_adapter_from_cfg(cfg: dict, model: VAEMapCore) -> OpticalOLSAd
 
 @torch.no_grad()
 def evaluate_map_loader(
-    model: VAEMapCore,
+    model,
     adapter,
     loader,
     device: torch.device,
@@ -81,7 +113,10 @@ def evaluate_map_loader(
     for x, _ in loader:
         x = x.to(device, non_blocking=True)
         z_mid = adapter.encode_from_input(x, sample_posterior=False)
-        recon = model.decode(z_mid)
+        if hasattr(model, "decode"):
+            recon = model.decode(z_mid)
+        else:
+            recon = model(z_mid)
 
         mse_per_sample = mse_loss(recon, x, reduction="none")
         psnr_per_sample = psnr_from_mse(mse_per_sample, data_range=data_range)
@@ -124,6 +159,19 @@ def save_optical_stage_visualization(
         xmax = x.amax(dim=(-2, -1), keepdim=True)
         return torch.clamp((x - xmin) / (xmax - xmin + 1e-6), 0.0, 1.0)
 
+    def _prepare_two_map_rows_shared(a: torch.Tensor, b: torch.Tensor, use_log1p: bool = True):
+        a = a[:max_items, :1]
+        b = b[:max_items, :1]
+        if use_log1p:
+            a = torch.log1p(torch.clamp(a, min=0.0))
+            b = torch.log1p(torch.clamp(b, min=0.0))
+        c = torch.cat([a, b], dim=0)
+        cmin = c.amin(dim=(-2, -1), keepdim=True)
+        cmax = c.amax(dim=(-2, -1), keepdim=True)
+        a = torch.clamp((a - cmin[: a.shape[0]]) / (cmax[: a.shape[0]] - cmin[: a.shape[0]] + 1e-6), 0.0, 1.0)
+        b = torch.clamp((b - cmin[a.shape[0] :]) / (cmax[a.shape[0] :] - cmin[a.shape[0] :] + 1e-6), 0.0, 1.0)
+        return a, b
+
     def _stack_rows(rows):
         target_h = max(int(r.shape[-2]) for r in rows)
         target_w = max(int(r.shape[-1]) for r in rows)
@@ -145,10 +193,16 @@ def save_optical_stage_visualization(
         else stages[min(len(stages) - 1, 3)]
     )
 
+    before_scatter_vis, sensor_pre_pool_vis = _prepare_two_map_rows_shared(
+        before_scatter,
+        sensor_pre_pool,
+        use_log1p=True,
+    )
+
     rows = [
         _prepare_image_row(inputs),
-        _prepare_map_row(before_scatter, use_log1p=True),
-        _prepare_map_row(sensor_pre_pool, use_log1p=True),
+        before_scatter_vis,
+        sensor_pre_pool_vis,
         _prepare_map_row(latent_mean, use_log1p=True),
         _prepare_image_row(recons),
     ]
@@ -177,7 +231,7 @@ def build_decoder_prior_cfg(prior_cfg: dict, klw_cfg: dict) -> dict:
 
 @torch.no_grad()
 def save_epoch_visuals_optical(
-    model: VAEMapCore,
+    model,
     adapter: OpticalOLSAdapter,
     epoch: int,
     fixed_inputs: torch.Tensor,
@@ -202,7 +256,7 @@ def save_epoch_visuals_optical(
         return_info=True,
         sample_posterior=False,
     )
-    recon_fixed = model.decode(z_fixed_mid)
+    recon_fixed = model.decode(z_fixed_mid) if hasattr(model, "decode") else model(z_fixed_mid)
 
     save_reconstruction_comparison(
         inputs=fixed_inputs,
@@ -233,7 +287,7 @@ def save_epoch_visuals_optical(
         device=device,
         apply_smooth=sample_apply_smooth,
     )
-    sampled = model.decode(z_mid_prior)
+    sampled = model.decode(z_mid_prior) if hasattr(model, "decode") else model(z_mid_prior)
     save_image_grid(sampled, path=sample_dir / "epoch_{:03d}_sample.png".format(epoch), nrow=8, out_range=out_range)
 
     interp_batch = next(iter(val_loader))[0]
@@ -248,7 +302,7 @@ def save_epoch_visuals_optical(
 
     alphas = torch.linspace(0.0, 1.0, steps=10, device=device).view(10, 1, 1, 1)
     z_interp = z1 * (1.0 - alphas) + z2 * alphas
-    interp_images = model.decode(z_interp)
+    interp_images = model.decode(z_interp) if hasattr(model, "decode") else model(z_interp)
     save_image_grid(
         interp_images,
         path=interp_dir / "epoch_{:03d}_interp.png".format(epoch),
@@ -259,7 +313,7 @@ def save_epoch_visuals_optical(
 
 def save_map_checkpoint(
     path: Path,
-    model: VAEMapCore,
+    model,
     adapter: OpticalOLSAdapter,
     optimizer: optim.Optimizer,
     epoch: int,

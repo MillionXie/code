@@ -5,11 +5,11 @@ data:
   image_size: [64, 64]
 
 model:
+  arch: pure_optical
   latent_channels: 1
   latent_hw: [10, 10]
-  # Encoder: 2 conv blocks
+  # The following conv settings are ignored when arch=pure_optical (kept for compatibility).
   encoder_channels: [32, 64]
-  # Decoder: 4 conv-transpose blocks
   decoder_channels: [256, 128, 64, 32]
   decoder_mode: deconv
   # full-res optional combo:
@@ -64,6 +64,13 @@ optics:
   z_to_scatter_mm: 20.0
   z_to_sensor_mm: 1.0
   posterior_sigma: 0.10
+  decoder:
+    field_init_mode: sqrt_positive
+    resize_hw: [200, 200]
+    layer_z_mm: [20.0, 20.0, 20.0, 20.0]
+    z_to_sensor_mm: 20.0
+    trainable: true
+    init: uniform
   pad_factor: 2.0
   bandlimit: true
   upsample_factor: 1

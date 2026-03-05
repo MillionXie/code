@@ -104,13 +104,15 @@ def main() -> None:
 
     model = build_map_core_from_cfg(cfg, dataset_info).to(device)
     adapter = build_optical_adapter_from_cfg(cfg, model).to(device)
-    # Optical mode uses optical encoder + electronic decoder.
-    for p in model.encoder.parameters():
-        p.requires_grad = False
-    for p in model.enc_to_mu.parameters():
-        p.requires_grad = False
-    for p in model.enc_to_logvar.parameters():
-        p.requires_grad = False
+    model_arch = str(cfg.get("model", {}).get("arch", "conv")).lower()
+    if hasattr(model, "encoder") and hasattr(model, "enc_to_mu") and hasattr(model, "enc_to_logvar"):
+        # Backward-compatible path: conv decoder model instance.
+        for p in model.encoder.parameters():
+            p.requires_grad = False
+        for p in model.enc_to_mu.parameters():
+            p.requires_grad = False
+        for p in model.enc_to_logvar.parameters():
+            p.requires_grad = False
     scatter_cfg = optics_cfg.get("scatter", {})
     sensor_cfg = optics_cfg.get("sensor", {})
     diff_cfg = optics_cfg.get("diffractive_layers", {})
@@ -149,11 +151,18 @@ def main() -> None:
 
     trainable_params = count_trainable_params(model) + count_trainable_params(adapter)
     logger.info("Trainable parameters: %d", trainable_params)
-    logger.info("Model trainable modules: decoder + optical adapter (encoder frozen)")
-    logger.info(
-        "Optical mode model config usage: latent_channels/latent_hw/decoder_* are active; "
-        "encoder_channels are kept for compatibility but not used in optical forward."
-    )
+    if model_arch in ("pure_optical", "optical_only", "optical"):
+        logger.info("Model trainable modules: optical encoder + optical decoder (pure optical VAE)")
+        logger.info(
+            "Optical mode model config usage: latent_channels/latent_hw and optics.decoder.* are active; "
+            "conv encoder/decoder settings are ignored."
+        )
+    else:
+        logger.info("Model trainable modules: decoder + optical adapter (encoder frozen)")
+        logger.info(
+            "Optical mode model config usage: latent_channels/latent_hw/decoder_* are active; "
+            "encoder_channels are kept for compatibility but not used in optical forward."
+        )
 
     train_params = [p for p in model.parameters() if p.requires_grad] + [p for p in adapter.parameters() if p.requires_grad]
     optimizer = optim.Adam(train_params, lr=float(train_cfg.get("lr", 1e-3)))
