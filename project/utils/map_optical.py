@@ -44,6 +44,7 @@ def build_map_core_from_cfg(cfg: dict, dataset_info: dict):
             phase_trainable=bool(dec_cfg.get("trainable", True)),
             phase_init=str(dec_cfg.get("init", "uniform")),
             out_range=str(cfg.get("data", {}).get("out_range", "zero_one")),
+            latent_to_field_mode=str(dec_cfg.get("latent_to_field_mode", "repeat")),
         )
 
     return VAEMapCore(
@@ -62,8 +63,21 @@ def build_optical_adapter_from_cfg(cfg: dict, model: VAEMapCore) -> OpticalOLSAd
     optics_cfg = cfg.get("optics", {})
     if not optics_cfg:
         raise ValueError("Optical config missing: require top-level 'optics' section")
+    model_cfg = cfg.get("model", {})
     sensor_cfg = optics_cfg.get("sensor", {})
-    resize_hw_cfg = optics_cfg.get("resize_hw", [model.latent_hw[0], model.latent_hw[1]])
+    latent_channels = int(model_cfg.get("latent_channels", getattr(model, "latent_channels", 1)))
+    latent_hw_cfg = model_cfg.get("latent_hw", None)
+    if latent_hw_cfg is None:
+        if hasattr(model, "latent_hw"):
+            latent_hw = tuple(getattr(model, "latent_hw"))
+        elif hasattr(model, "latent_h") and hasattr(model, "latent_w"):
+            latent_hw = (int(getattr(model, "latent_h")), int(getattr(model, "latent_w")))
+        else:
+            raise ValueError("Cannot resolve latent_hw from config/model")
+    else:
+        latent_hw = (int(latent_hw_cfg[0]), int(latent_hw_cfg[1]))
+
+    resize_hw_cfg = optics_cfg.get("resize_hw", [latent_hw[0], latent_hw[1]])
     resize_hw = tuple(resize_hw_cfg) if resize_hw_cfg is not None else None
     diff_cfg = optics_cfg.get("diffractive_layers", {})
     diff_z_cfg = diff_cfg.get("z_mm", [optics_cfg.get("z1_mm", 20.0), optics_cfg.get("z1_mm", 20.0)])
@@ -74,7 +88,7 @@ def build_optical_adapter_from_cfg(cfg: dict, model: VAEMapCore) -> OpticalOLSAd
     posterior_sigma_cfg = optics_cfg.get("posterior_sigma", cfg.get("loss", {}).get("posterior_sigma", 0.1))
 
     return OpticalOLSAdapter(
-        latent_shape=(model.latent_channels, model.latent_hw[0], model.latent_hw[1]),
+        latent_shape=(latent_channels, latent_hw[0], latent_hw[1]),
         resize_hw=resize_hw,
         field_init_mode=str(optics_cfg.get("field_init_mode", "real")),
         wavelength_nm=float(optics_cfg.get("wavelength_nm", 532.0)),

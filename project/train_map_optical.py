@@ -138,6 +138,15 @@ def main() -> None:
         float(optics_cfg.get("z_to_sensor_mm", 1.0)),
         float(optics_cfg.get("posterior_sigma", loss_cfg.get("posterior_sigma", 0.1))),
     )
+    if model_arch in ("pure_optical", "optical_only", "optical"):
+        dec_cfg = optics_cfg.get("decoder", {})
+        logger.info(
+            "DiffractiveDecoder | phase_layers=4 field_hw=%s latent_to_field_mode=%s layer_z_mm=%s z_to_sensor_mm=%s",
+            tuple(dec_cfg.get("resize_hw", optics_cfg.get("resize_hw", data_cfg.get("image_size", [64, 64])))),
+            str(dec_cfg.get("latent_to_field_mode", "repeat")),
+            tuple(dec_cfg.get("layer_z_mm", [20.0, 20.0, 20.0, 20.0])),
+            float(dec_cfg.get("z_to_sensor_mm", 20.0)),
+        )
     logger.info(
         "Scatter+Sensor | scatter_type=%s scatter.static=%s latent_hw=%s pool_type=%s pool_kernel=%s pool_stride=%s pool_reduce=%s",
         str(scatter_cfg.get("type", "iid_phase")),

@@ -65,6 +65,8 @@ optics:
   decoder:
     field_init_mode: sqrt_positive
     resize_hw: [200, 200]
+    # 10x10 latent -> 200x200 field by block repeat (physically consistent inverse mapping).
+    latent_to_field_mode: repeat
     layer_z_mm: [30.0, 30.0, 30.0, 30.0]
     z_to_sensor_mm: 30.0
     trainable: true

@@ -296,9 +296,11 @@ class OpticalDiffractionDecoder(nn.Module):
         phase_trainable: bool = True,
         phase_init: str = "uniform",
         out_range: str = "zero_one",
+        latent_to_field_mode: str = "repeat",
     ):
         super().__init__()
         self.latent_channels, self.latent_h, self.latent_w = latent_shape
+        self.latent_hw = (self.latent_h, self.latent_w)
         self.out_channels = int(out_channels)
         self.output_hw = (int(output_hw[0]), int(output_hw[1]))
         self.field_hw = field_hw if field_hw is not None else self.output_hw
@@ -312,6 +314,7 @@ class OpticalDiffractionDecoder(nn.Module):
         self.bandlimit = bool(bandlimit)
         self.upsample_factor = int(max(1, upsample_factor))
         self.out_range = str(out_range)
+        self.latent_to_field_mode = str(latent_to_field_mode).lower()
         self.phase_trainable = bool(phase_trainable)
         self.phase_init = str(phase_init).lower()
 
@@ -337,6 +340,24 @@ class OpticalDiffractionDecoder(nn.Module):
         imag = F.interpolate(E.imag, size=target_hw, mode="bilinear", align_corners=False)
         return torch.complex(real, imag)
 
+    def _expand_latent_map(self, x: torch.Tensor) -> torch.Tensor:
+        if x.shape[-2:] == self.field_hw:
+            return x
+
+        if self.latent_to_field_mode == "repeat":
+            h, w = x.shape[-2], x.shape[-1]
+            if self.field_hw[0] % h == 0 and self.field_hw[1] % w == 0:
+                sh = self.field_hw[0] // h
+                sw = self.field_hw[1] // w
+                return x.repeat_interleave(sh, dim=-2).repeat_interleave(sw, dim=-1)
+            return F.interpolate(x, size=self.field_hw, mode="nearest")
+
+        if self.latent_to_field_mode == "nearest":
+            return F.interpolate(x, size=self.field_hw, mode="nearest")
+        if self.latent_to_field_mode == "bilinear":
+            return F.interpolate(x, size=self.field_hw, mode="bilinear", align_corners=False)
+        raise ValueError("Unsupported latent_to_field_mode: {}".format(self.latent_to_field_mode))
+
     def _align_channels(self, x: torch.Tensor, target_channels: int) -> torch.Tensor:
         c_in = x.shape[1]
         if c_in == target_channels:
@@ -351,6 +372,7 @@ class OpticalDiffractionDecoder(nn.Module):
 
     def _latent_to_complex(self, z_latent: torch.Tensor) -> torch.Tensor:
         z_latent = self._align_channels(z_latent, self.latent_channels)
+        z_latent = self._expand_latent_map(z_latent)
         if self.field_init_mode in ("sqrt_positive", "sqrt"):
             amp = torch.sqrt(torch.clamp(z_latent, min=0.0) + 1e-8)
         elif self.field_init_mode == "real":
