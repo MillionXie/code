@@ -118,24 +118,36 @@ def evaluate_loader(model: VAEMapCore, adapter: OpticalOLSAdapter, loader, devic
 
 @torch.no_grad()
 def save_optical_stage_visualization(
+    inputs: torch.Tensor,
     optics_info: dict,
     path: Path,
     max_items: int = 6,
-    optics_show: str = "stage",
-    sensor_path: Optional[Path] = None,
+    out_range: str = "zero_one",
+    optics_show: str = "simple",
     logger=None,
 ) -> None:
     stages = optics_info.get("stage_intensity_maps", [])
     stage_names = optics_info.get("stage_intensity_names", [])
-    sensor_info = optics_info.get("sensor", {})
+    final_latent = optics_info.get("final_latent_map", None)
 
-    if len(stages) == 0:
+    if len(stages) == 0 or final_latent is None:
         return
 
-    def _prepare_row(x: torch.Tensor) -> torch.Tensor:
+    def _prepare_image_row(x: torch.Tensor) -> torch.Tensor:
         x = x[:max_items, :1]  # channel0 only
-        x = x / (x.mean(dim=(-2, -1), keepdim=True) + 1e-6)
-        x = torch.clamp(x, 0.0, 3.0) / 3.0
+        if out_range == "neg_one_one":
+            x = (x + 1.0) / 2.0
+        x = torch.clamp(x, 0.0, 1.0)
+        return x
+
+    def _prepare_map_row(x: torch.Tensor, use_log1p: bool = False) -> torch.Tensor:
+        x = x[:max_items, :1]  # channel0 only
+        if use_log1p:
+            x = torch.log1p(torch.clamp(x, min=0.0))
+        xmin = x.amin(dim=(-2, -1), keepdim=True)
+        xmax = x.amax(dim=(-2, -1), keepdim=True)
+        x = (x - xmin) / (xmax - xmin + 1e-6)
+        x = torch.clamp(x, 0.0, 1.0)
         return x
 
     def _stack_rows(rows: List[torch.Tensor]) -> torch.Tensor:
@@ -144,42 +156,31 @@ def save_optical_stage_visualization(
         resized = []
         for r in rows:
             if r.shape[-2:] != (target_h, target_w):
-                r = torch.nn.functional.interpolate(r, size=(target_h, target_w), mode="nearest")
+                r = torch.nn.functional.interpolate(r, size=(target_h, target_w), mode="bilinear", align_corners=False)
             resized.append(r)
         return torch.cat(resized, dim=0)
 
-    prop1 = stages[stage_names.index("prop1")] if "prop1" in stage_names else stages[min(len(stages) - 1, 0)]
-    scatter = stages[stage_names.index("scatter")] if "scatter" in stage_names else stages[min(len(stages) - 1, 1)]
-    sensor_roi = sensor_info.get("roi_intensity", stages[-1])
-    sensor_pooled = sensor_info.get("pooled_intensity", sensor_roi)
-    sensor_final = sensor_info.get("final_intensity", sensor_pooled)
+    field_input = stages[stage_names.index("input")] if "input" in stage_names else stages[0]
+    scatter = stages[stage_names.index("scatter")] if "scatter" in stage_names else stages[min(len(stages) - 1, 2)]
+    final_latent = final_latent
 
-    show_mode = str(optics_show).lower()
-    if show_mode in ("sensor_pooled", "both"):
-        sensor_row = sensor_pooled
-        sensor_row_name = "sensor_pooled_intensity"
-    else:
-        sensor_row = sensor_roi
-        sensor_row_name = "sensor_roi_intensity"
-
-    main_grid = _stack_rows([_prepare_row(prop1), _prepare_row(scatter), _prepare_row(sensor_row)])
+    # Fixed 4-row visualization:
+    # 1) input image, 2) field input intensity(before propagation), 3) scatter intensity, 4) final latent for decoder.
+    rows = [
+        _prepare_image_row(inputs),
+        _prepare_map_row(field_input, use_log1p=True),
+        _prepare_map_row(scatter, use_log1p=True),
+        _prepare_map_row(final_latent, use_log1p=False),
+    ]
+    main_grid = _stack_rows(rows)
     save_image_grid(main_grid, path=path, nrow=max_items, out_range="zero_one")
 
     if logger is not None:
         logger.info(
-            "optics.png semantics: 3 rows x %d cols, channel0 only; rows=[prop1_intensity, scatter_intensity, %s], cols=samples",
+            "optics.png semantics: 4 rows x %d cols, channel0 only; "
+            "rows=[input_image, field_input_intensity(before_propagation), scatter_intensity(after_scatter), final_latent_map(input_to_decoder)], cols=samples",
             max_items,
-            sensor_row_name,
         )
-
-    if show_mode == "both" and sensor_path is not None:
-        sensor_grid = _stack_rows([_prepare_row(sensor_roi), _prepare_row(sensor_pooled), _prepare_row(sensor_final)])
-        save_image_grid(sensor_grid, path=sensor_path, nrow=max_items, out_range="zero_one")
-        if logger is not None:
-            logger.info(
-                "optics_sensor.png semantics: 3 rows x %d cols, channel0 only; rows=[roi_intensity, pooled_intensity, final_intensity], cols=samples",
-                max_items,
-            )
 
 
 def build_decoder_prior_cfg(prior_cfg: dict, klw_cfg: dict) -> dict:
@@ -231,11 +232,12 @@ def save_epoch_visuals(
     )
 
     save_optical_stage_visualization(
-        info_fixed,
+        inputs=fixed_inputs,
+        optics_info=info_fixed,
         path=optics_dir / "epoch_{:03d}_optics.png".format(epoch),
         max_items=6,
+        out_range=out_range,
         optics_show=optics_show,
-        sensor_path=optics_dir / "epoch_{:03d}_optics_sensor.png".format(epoch),
         logger=logger,
     )
 
@@ -435,8 +437,8 @@ def main() -> None:
     decoder_prior_cfg = build_decoder_prior_cfg(prior_cfg=prior_cfg, klw_cfg=klw_cfg)
 
     optics_show = str(viz_cfg.get("optics_show", "stage")).lower()
-    if optics_show not in ("stage", "sensor_roi", "sensor_pooled", "both"):
-        raise ValueError("viz.optics_show must be one of: stage|sensor_roi|sensor_pooled|both")
+    if optics_show not in ("simple", "stage", "sensor_roi", "sensor_pooled", "both"):
+        raise ValueError("viz.optics_show must be one of: simple|stage|sensor_roi|sensor_pooled|both")
     logger.info(
         "KL_w | target=%s var_mode=%s var0=%.6f M0=%.6f prior_sigma0=%.6f pre_norm=%s clamp_nonnegative=%s",
         kl_target,

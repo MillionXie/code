@@ -81,7 +81,7 @@ optics:
     read_noise_std: 0.0
 
 viz:
-  optics_show: stage
+  optics_show: simple
 
 sample:
   n_samples: 64
