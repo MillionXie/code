@@ -163,11 +163,11 @@ class OpticalOLSAdapter(nn.Module):
                 bandlimit=self.bandlimit,
                 upsample_factor=self.upsample_factor,
             )
+            stage_names.append("enc_pre_mod{}".format(idx + 1))
+            stage_maps.append(detect_intensity(E))
             phase = self.phase_masks[idx]
             phase_mask = torch.exp(1j * phase).to(E.dtype)
             E = E * phase_mask
-            stage_names.append("diff{}".format(idx + 1))
-            stage_maps.append(detect_intensity(E))
 
         E = angular_spectrum_propagate(
             E_complex=E,
@@ -406,11 +406,11 @@ class OpticalDiffractionDecoder(nn.Module):
                 bandlimit=self.bandlimit,
                 upsample_factor=self.upsample_factor,
             )
+            stage_names.append("dec_pre_mod{}".format(idx + 1))
+            stage_maps.append(detect_intensity(E))
             phase = self.phase_masks[idx]
             phase_mask = torch.exp(1j * phase).to(E.dtype)
             E = E * phase_mask
-            stage_names.append("dec_diff{}".format(idx + 1))
-            stage_maps.append(detect_intensity(E))
 
         E = angular_spectrum_propagate(
             E_complex=E,
@@ -422,7 +422,7 @@ class OpticalDiffractionDecoder(nn.Module):
             upsample_factor=self.upsample_factor,
         )
         I_sensor = detect_intensity(E)
-        stage_names.append("dec_sensor")
+        stage_names.append("dec_final_field")
         stage_maps.append(I_sensor)
 
         x_hat = self._intensity_to_output(I_sensor)

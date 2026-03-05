@@ -5,6 +5,7 @@ from typing import Optional
 
 import torch
 import torch.optim as optim
+import math
 
 from models import OpticalDiffractionDecoder, OpticalOLSAdapter, VAEMapCore
 from utils.losses_optical import sample_map_prior
@@ -146,17 +147,18 @@ def evaluate_map_loader(
 def save_optical_stage_visualization(
     inputs: torch.Tensor,
     recons: torch.Tensor,
-    optics_info: dict,
+    encoder_info: dict,
+    decoder_info: Optional[dict],
     path: Path,
     max_items: int = 6,
     out_range: str = "zero_one",
     logger=None,
 ) -> None:
-    stages = optics_info.get("stage_intensity_maps", [])
-    stage_names = optics_info.get("stage_intensity_names", [])
-    latent_mean = optics_info.get("latent_mean_map", None)
+    enc_stages = encoder_info.get("stage_intensity_maps", [])
+    enc_names = encoder_info.get("stage_intensity_names", [])
+    latent_mean = encoder_info.get("latent_mean_map", None)
 
-    if len(stages) == 0 or latent_mean is None:
+    if len(enc_stages) == 0 or latent_mean is None:
         return
 
     def _prepare_image_row(x: torch.Tensor) -> torch.Tensor:
@@ -173,19 +175,6 @@ def save_optical_stage_visualization(
         xmax = x.amax(dim=(-2, -1), keepdim=True)
         return torch.clamp((x - xmin) / (xmax - xmin + 1e-6), 0.0, 1.0)
 
-    def _prepare_two_map_rows_shared(a: torch.Tensor, b: torch.Tensor, use_log1p: bool = True):
-        a = a[:max_items, :1]
-        b = b[:max_items, :1]
-        if use_log1p:
-            a = torch.log1p(torch.clamp(a, min=0.0))
-            b = torch.log1p(torch.clamp(b, min=0.0))
-        c = torch.cat([a, b], dim=0)
-        cmin = c.amin(dim=(-2, -1), keepdim=True)
-        cmax = c.amax(dim=(-2, -1), keepdim=True)
-        a = torch.clamp((a - cmin[: a.shape[0]]) / (cmax[: a.shape[0]] - cmin[: a.shape[0]] + 1e-6), 0.0, 1.0)
-        b = torch.clamp((b - cmin[a.shape[0] :]) / (cmax[a.shape[0] :] - cmin[a.shape[0] :] + 1e-6), 0.0, 1.0)
-        return a, b
-
     def _stack_rows(rows):
         target_h = max(int(r.shape[-2]) for r in rows)
         target_w = max(int(r.shape[-1]) for r in rows)
@@ -196,38 +185,45 @@ def save_optical_stage_visualization(
             resized.append(r)
         return torch.cat(resized, dim=0)
 
-    before_scatter = (
-        stages[stage_names.index("before_scatter")]
-        if "before_scatter" in stage_names
-        else stages[min(len(stages) - 1, 2)]
-    )
-    sensor_pre_pool = (
-        stages[stage_names.index("sensor_pre_pool")]
-        if "sensor_pre_pool" in stage_names
-        else stages[min(len(stages) - 1, 3)]
-    )
+    def _pick_stage(names, maps, key: str, fallback: torch.Tensor) -> torch.Tensor:
+        if key in names:
+            return maps[names.index(key)]
+        return fallback
 
-    before_scatter_vis, sensor_pre_pool_vis = _prepare_two_map_rows_shared(
-        before_scatter,
-        sensor_pre_pool,
-        use_log1p=True,
-    )
+    enc_pre_mod1 = _pick_stage(enc_names, enc_stages, "enc_pre_mod1", enc_stages[0])
+    enc_pre_mod2 = _pick_stage(enc_names, enc_stages, "enc_pre_mod2", enc_pre_mod1)
+    before_scatter = _pick_stage(enc_names, enc_stages, "before_scatter", enc_pre_mod2)
+    after_scatter = _pick_stage(enc_names, enc_stages, "after_scatter", before_scatter)
+
+    dec_names = decoder_info.get("stage_intensity_names", []) if decoder_info is not None else []
+    dec_stages = decoder_info.get("stage_intensity_maps", []) if decoder_info is not None else []
+    dec_pre_mod1 = _pick_stage(dec_names, dec_stages, "dec_pre_mod1", latent_mean)
+    dec_pre_mod2 = _pick_stage(dec_names, dec_stages, "dec_pre_mod2", dec_pre_mod1)
+    dec_pre_mod3 = _pick_stage(dec_names, dec_stages, "dec_pre_mod3", dec_pre_mod2)
+    dec_pre_mod4 = _pick_stage(dec_names, dec_stages, "dec_pre_mod4", dec_pre_mod3)
+    dec_final_field = _pick_stage(dec_names, dec_stages, "dec_final_field", dec_pre_mod4)
 
     rows = [
         _prepare_image_row(inputs),
-        before_scatter_vis,
-        sensor_pre_pool_vis,
+        _prepare_map_row(enc_pre_mod1, use_log1p=True),
+        _prepare_map_row(enc_pre_mod2, use_log1p=True),
+        _prepare_map_row(before_scatter, use_log1p=True),
+        _prepare_map_row(after_scatter, use_log1p=True),
         _prepare_map_row(latent_mean, use_log1p=True),
-        _prepare_image_row(recons),
+        _prepare_map_row(dec_pre_mod1, use_log1p=True),
+        _prepare_map_row(dec_pre_mod2, use_log1p=True),
+        _prepare_map_row(dec_pre_mod3, use_log1p=True),
+        _prepare_map_row(dec_pre_mod4, use_log1p=True),
+        _prepare_map_row(dec_final_field, use_log1p=True),
     ]
     grid = _stack_rows(rows)
     save_image_grid(grid, path=path, nrow=max_items, out_range="zero_one")
 
     if logger is not None:
         logger.info(
-            "optics.png semantics: 5 rows x %d cols, channel0 only; "
-            "rows=[input_image, before_scatter_field_intensity, "
-            "post_scatter_propagated_intensity(pre_pool), latent_mean_map(post_pool), reconstruction], cols=samples",
+            "optics.png semantics: 11 rows x %d cols, channel0 only; "
+            "rows=[input, enc_pre_mod1, enc_pre_mod2, before_scatter, after_scatter, latent, "
+            "dec_pre_mod3, dec_pre_mod4, dec_pre_mod5, dec_pre_mod6, dec_final_field].",
             max_items,
         )
 
@@ -270,7 +266,18 @@ def save_epoch_visuals_optical(
         return_info=True,
         sample_posterior=False,
     )
-    recon_fixed = model.decode(z_fixed_mid) if hasattr(model, "decode") else model(z_fixed_mid)
+    decoder_info = None
+    if hasattr(model, "decode"):
+        try:
+            decoded = model.decode(z_fixed_mid, return_info=True)
+            if isinstance(decoded, tuple) and len(decoded) == 2:
+                recon_fixed, decoder_info = decoded
+            else:
+                recon_fixed = decoded
+        except TypeError:
+            recon_fixed = model.decode(z_fixed_mid)
+    else:
+        recon_fixed = model(z_fixed_mid)
 
     save_reconstruction_comparison(
         inputs=fixed_inputs,
@@ -283,7 +290,8 @@ def save_epoch_visuals_optical(
     save_optical_stage_visualization(
         inputs=fixed_inputs,
         recons=recon_fixed,
-        optics_info=info_fixed,
+        encoder_info=info_fixed,
+        decoder_info=decoder_info,
         path=optics_dir / "epoch_{:03d}_optics.png".format(epoch),
         max_items=6,
         out_range=out_range,
@@ -349,6 +357,57 @@ def save_map_checkpoint(
     torch.save(payload, path)
 
 
+@torch.no_grad()
+def save_optical_phase_parameters(
+    epoch: int,
+    adapter: OpticalOLSAdapter,
+    model,
+    outdir: Path,
+    logger=None,
+) -> None:
+    encoder_phases = []
+    decoder_phases = []
+
+    if hasattr(adapter, "phase_masks"):
+        encoder_phases = [p.detach().cpu().clone() for p in list(adapter.phase_masks)]
+    if hasattr(model, "phase_masks"):
+        decoder_phases = [p.detach().cpu().clone() for p in list(model.phase_masks)]
+
+    if len(encoder_phases) == 0 and len(decoder_phases) == 0:
+        return
+
+    payload = {
+        "epoch": int(epoch),
+        "encoder_phase_radians": encoder_phases,
+        "decoder_phase_radians": decoder_phases,
+        "encoder_num_layers": len(encoder_phases),
+        "decoder_num_layers": len(decoder_phases),
+    }
+    phase_pt = outdir / "epoch_{:03d}_phase_params.pt".format(epoch)
+    torch.save(payload, phase_pt)
+
+    phase_imgs = []
+    for p in encoder_phases + decoder_phases:
+        phase_norm = torch.remainder(p, 2.0 * math.pi) / (2.0 * math.pi)
+        phase_imgs.append(phase_norm[:1, :1])
+    if len(phase_imgs) > 0:
+        phase_grid = torch.cat(phase_imgs, dim=0)
+        save_image_grid(
+            phase_grid,
+            path=outdir / "epoch_{:03d}_phase_maps.png".format(epoch),
+            nrow=max(1, len(phase_imgs)),
+            out_range="zero_one",
+        )
+
+    if logger is not None:
+        logger.info(
+            "Saved optical phase params: encoder_layers=%d decoder_layers=%d -> %s",
+            len(encoder_phases),
+            len(decoder_phases),
+            phase_pt,
+        )
+
+
 __all__ = [
     "build_map_core_from_cfg",
     "build_optical_adapter_from_cfg",
@@ -357,4 +416,5 @@ __all__ = [
     "build_decoder_prior_cfg",
     "save_epoch_visuals_optical",
     "save_map_checkpoint",
+    "save_optical_phase_parameters",
 ]

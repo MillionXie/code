@@ -24,6 +24,7 @@ from utils.map_optical import (
     evaluate_map_loader,
     save_epoch_visuals_optical,
     save_map_checkpoint,
+    save_optical_phase_parameters,
 )
 from utils.seed import set_seed
 
@@ -84,6 +85,7 @@ def main() -> None:
     sample_dir = ensure_dir(run_dir / "samples")
     interp_dir = ensure_dir(run_dir / "interpolations")
     optics_dir = ensure_dir(run_dir / "optics")
+    phase_dir = ensure_dir(run_dir / "optics_params")
     log_dir = ensure_dir(run_dir / "logs")
 
     logger = create_logger("train_map_optical", outdir=log_dir, filename="train_map_optical.log")
@@ -369,6 +371,13 @@ def main() -> None:
             sample_apply_smooth=sample_apply_smooth_in_train,
             sample_prior_space=sample_prior_space,
             decoder_prior_cfg=decoder_prior_cfg,
+            logger=logger,
+        )
+        save_optical_phase_parameters(
+            epoch=epoch,
+            adapter=adapter,
+            model=model,
+            outdir=phase_dir,
             logger=logger,
         )
 
