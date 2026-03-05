@@ -20,11 +20,11 @@ pip install -r requirements.txt
 ## 1) 电子向量基线（原 train_vae.py，不受 map-optical 改动影响）
 
 ```bash
-# MNIST tiny 训练（经典 vector latent baseline）
+# MNIST tiny 训练（公平电子基线，约 24k 参数）
 python train_vae.py \
   --dataset mnist \
   --model_size tiny \
-  --latent_dim 100 \
+  --latent_dim 64 \
   --beta 1.0 \
   --epochs 30 \
   --batch_size 128 \
@@ -40,7 +40,7 @@ python train_vae.py \
 python train_vae.py \
   --dataset cifar10 \
   --model_size small \
-  --latent_dim 100 \
+  --latent_dim 64 \
   --beta 1.0 \
   --epochs 50 \
   --batch_size 128 \

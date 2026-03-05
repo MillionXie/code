@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from typing import Literal, Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -25,11 +24,12 @@ class ConvVAE(nn.Module):
         self.out_range = out_range
 
         if model_size == "tiny":
-            channels = [16, 32, 64]
-            hidden_dim = 128
+            # Fair-comparison electronic baseline: ~24k trainable params (latent_dim=64).
+            channels = [4, 6, 14]
+            hidden_dim = 32
         elif model_size == "small":
-            channels = [32, 64, 128]
-            hidden_dim = 512
+            channels = [6, 10, 16]
+            hidden_dim = 48
         else:
             raise ValueError(f"Unsupported model_size: {model_size}")
 
@@ -55,7 +55,7 @@ class ConvVAE(nn.Module):
             enc_out = self.encoder(dummy)
         self.encoder.train(prev_training)
         self.enc_feature_shape = tuple(enc_out.shape[1:])
-        self.enc_feature_dim = int(np.prod(self.enc_feature_shape))
+        self.enc_feature_dim = int(enc_out[0].numel())
 
         self.fc_enc = nn.Linear(self.enc_feature_dim, hidden_dim)
         self.fc_mu = nn.Linear(hidden_dim, latent_dim)

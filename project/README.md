@@ -66,7 +66,7 @@ pip install -r requirements.txt
 python train_vae.py \
   --dataset mnist \
   --model_size tiny \
-  --latent_dim 100 \
+  --latent_dim 64 \
   --beta 1.0 \
   --epochs 20 \
   --batch_size 128 \
@@ -80,7 +80,7 @@ python train_vae.py \
 2. CIFAR-10 small 训练
 
 ```bash
-python train_vae.py --dataset cifar10 --model_size small --latent_dim 100 --beta 1.0 --epochs 50 --batch_size 128 --lr 1e-3 --recon_loss auto --out_range zero_one --data_root ./data --outdir ./outputs/cifar10_small
+python train_vae.py --dataset cifar10 --model_size small --latent_dim 64 --beta 1.0 --epochs 50 --batch_size 128 --lr 1e-3 --recon_loss auto --out_range zero_one --data_root ./data --outdir ./outputs/cifar10_small
 ```
 
 3. 评估（test MSE/PSNR + 重建图）
@@ -119,6 +119,9 @@ python analyze_latent.py \
 - `reconstructions/epoch_xxx_recon.png`
 - `samples/epoch_xxx_sample.png`
 - `interpolations/epoch_xxx_interp.png`
+- `latent_viz/epoch_xxx_mu_heatmap.png`
+- `latent_viz/epoch_xxx_logvar_heatmap.png`
+- `latent_viz/epoch_xxx_kl_heatmap.png`
 - `logs/train.log`
 - `history.csv`
 - `results.json`
@@ -134,12 +137,10 @@ python analyze_latent.py \
 - `summary.json`
 - `summary.csv`
 
-## LatentProvider 统一接口
+## 电子基线说明
 
-- `GaussianPriorProvider`: 先验采样 `z ~ N(0, I)`
-- `EncoderPosteriorProvider`: 编码器后验 `q(z|x)`（可采样或直接取 `mu`）
-
-后续新增 `ScatteringProvider` 时可直接复用现有训练/生成主流程。
+- 当前电子基线为纯电子 ConvVAE（不依赖 `LatentProvider` 抽象）。
+- 默认公平配置为 `model_size=tiny, latent_dim=64`，参数量约 `24k`（MNIST/CIFAR 都接近）。
 
 ## 新增：Map-Latent 双入口（共享 encoder/decoder）
 

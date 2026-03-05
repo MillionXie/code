@@ -4,7 +4,6 @@ from pathlib import Path
 import torch
 
 from data.datasets import get_dataset_info
-from latent import GaussianPriorProvider
 from models import ConvVAE
 from utils.io import now_timestamp, save_json
 from utils.logger import create_logger
@@ -57,11 +56,8 @@ def main() -> None:
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()
 
-    provider = GaussianPriorProvider(latent_dim=model.latent_dim)
-
     with torch.no_grad():
-        latent = provider.get_latent(model=model, num_samples=args.n_samples, device=device)
-        samples = model.decode(latent.z)
+        samples = model.sample_prior(num_samples=args.n_samples, device=device)
 
     sample_path = outdir / "samples.png"
     save_image_grid(samples, path=sample_path, nrow=args.grid_size, out_range=model.out_range)

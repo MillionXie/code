@@ -6,7 +6,6 @@ import torch.optim as optim
 from tqdm import tqdm
 
 from data.datasets import get_dataloaders
-from latent import EncoderPosteriorProvider, GaussianPriorProvider
 from models import ConvVAE
 from utils.io import append_row_csv, count_trainable_params, ensure_dir, now_timestamp, save_json, write_summary_csv
 from utils.logger import create_logger, log_args
@@ -18,7 +17,7 @@ from utils.viz import save_image_grid, save_reconstruction_comparison
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train ConvVAE on MNIST/CIFAR-10")
     parser.add_argument("--dataset", type=str, choices=["mnist", "cifar10"], default="mnist")
-    parser.add_argument("--latent_dim", type=int, default=100)
+    parser.add_argument("--latent_dim", type=int, default=64)
     parser.add_argument("--model_size", type=str, choices=["tiny", "small"], default="tiny")
     parser.add_argument("--beta", type=float, default=1.0)
     parser.add_argument("--epochs", type=int, default=30)
@@ -96,11 +95,10 @@ def save_epoch_visuals(
     fixed_inputs: torch.Tensor,
     val_loader,
     out_range: str,
-    prior_provider: GaussianPriorProvider,
-    posterior_provider: EncoderPosteriorProvider,
     recon_dir: Path,
     sample_dir: Path,
     interp_dir: Path,
+    latent_dir: Path,
     device: torch.device,
 ) -> None:
     model.eval()
@@ -114,13 +112,42 @@ def save_epoch_visuals(
         out_range=out_range,
     )
 
-    prior_latent = prior_provider.get_latent(model=model, num_samples=64, device=device)
-    sampled = model.decode(prior_latent.z)
+    sampled = model.sample_prior(num_samples=64, device=device)
     save_image_grid(
         sampled,
         path=sample_dir / f"epoch_{epoch:03d}_sample.png",
         nrow=8,
         out_range=out_range,
+    )
+
+    with torch.no_grad():
+        mu_fixed, logvar_fixed = model.encode(fixed_inputs)
+        kl_fixed = kl_divergence(mu_fixed, logvar_fixed, reduction="none")
+
+    def _to_heatmap_tensor(x: torch.Tensor) -> torch.Tensor:
+        x = x.detach().cpu()
+        x_min = x.min()
+        x_max = x.max()
+        x = (x - x_min) / (x_max - x_min + 1e-8)
+        return x.unsqueeze(0).unsqueeze(0)
+
+    save_image_grid(
+        _to_heatmap_tensor(mu_fixed),
+        path=latent_dir / f"epoch_{epoch:03d}_mu_heatmap.png",
+        nrow=1,
+        out_range="zero_one",
+    )
+    save_image_grid(
+        _to_heatmap_tensor(logvar_fixed),
+        path=latent_dir / f"epoch_{epoch:03d}_logvar_heatmap.png",
+        nrow=1,
+        out_range="zero_one",
+    )
+    save_image_grid(
+        _to_heatmap_tensor(kl_fixed.unsqueeze(1)),
+        path=latent_dir / f"epoch_{epoch:03d}_kl_heatmap.png",
+        nrow=1,
+        out_range="zero_one",
     )
 
     interp_batch = next(iter(val_loader))[0]
@@ -129,8 +156,8 @@ def save_epoch_visuals(
 
     idx = torch.randperm(interp_batch.size(0))[:2]
     pair = interp_batch[idx].to(device)
-    latent_pair = posterior_provider.get_latent(model=model, x=pair)
-    z1, z2 = latent_pair.z[0:1], latent_pair.z[1:2]
+    mu_pair, _ = model.encode(pair)
+    z1, z2 = mu_pair[0:1], mu_pair[1:2]
 
     alphas = torch.linspace(0.0, 1.0, steps=10, device=device).unsqueeze(1)
     z_interp = z1 * (1.0 - alphas) + z2 * alphas
@@ -158,6 +185,7 @@ def main() -> None:
     recon_dir = ensure_dir(run_dir / "reconstructions")
     sample_dir = ensure_dir(run_dir / "samples")
     interp_dir = ensure_dir(run_dir / "interpolations")
+    latent_dir = ensure_dir(run_dir / "latent_viz")
     log_dir = ensure_dir(run_dir / "logs")
 
     logger = create_logger("train_vae", outdir=log_dir, filename="train.log")
@@ -188,13 +216,17 @@ def main() -> None:
 
     trainable_params = count_trainable_params(model)
     logger.info("Trainable parameters: %d", trainable_params)
+    if args.model_size == "tiny" and args.latent_dim == 64:
+        logger.info("Fair baseline profile active: tiny + latent_dim=64 (~24k params).")
+    else:
+        logger.warning(
+            "Current setting deviates from fair-profile (tiny+64). params=%d",
+            trainable_params,
+        )
 
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
 
     fixed_inputs = next(iter(val_loader))[0][:8].to(device)
-    prior_provider = GaussianPriorProvider(latent_dim=args.latent_dim)
-    posterior_provider = EncoderPosteriorProvider(sample=False)
-
     history = []
     history_csv = run_dir / "history.csv"
     best_val_mse = float("inf")
@@ -278,11 +310,10 @@ def main() -> None:
             fixed_inputs=fixed_inputs,
             val_loader=val_loader,
             out_range=args.out_range,
-            prior_provider=prior_provider,
-            posterior_provider=posterior_provider,
             recon_dir=recon_dir,
             sample_dir=sample_dir,
             interp_dir=interp_dir,
+            latent_dir=latent_dir,
             device=device,
         )
 
