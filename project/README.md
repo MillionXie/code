@@ -220,6 +220,6 @@ python analyze_map.py \
 ### Optical Sensor/Pooling 物理约定
 
 - `pad/unpad` 仅在 `angular_spectrum_propagate` 内部处理。
-- `optics.sensor.roi_hw` 仅表示额外视场裁剪（有效区域），默认建议 `null`。
-- 推荐用一次 `pool_kernel == pool_stride` 的 pooling 直接把 `resize_hw` 降到 `model.latent_hw`（微透镜阵列规则分块汇聚）。
-- `optics.sensor.out_hw` 是可选数字后处理缩放，默认建议 `null`（关闭）。
+- 光学链路统一为：`输入场 -> 传播 -> 散射 -> 传播 -> 强度探测 -> 可选 pooling -> 潜空间`。
+- 默认不做 ROI 裁剪、不做额外插值缩放；建议只用一次 `pool_kernel == pool_stride` 的 pooling 直接把 `resize_hw` 降到 `model.latent_hw`（微透镜阵列规则分块汇聚）。
+- 若不想池化，设 `optics.sensor.pool_type: none`，并让 `model.latent_hw` 与解 padding 后的光场尺寸一致。

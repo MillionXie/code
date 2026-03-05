@@ -106,7 +106,7 @@ python sample_map_electronic.py \
 ## 3) Map-Latent 光学版（Optical OLS）
 
 ```bash
-# MNIST map-optical 训练（当前默认：roi_hw=null, out_hw=null, pooling 一次到 latent_hw）
+# MNIST map-optical 训练（默认流程：传播/散射后强度 -> 一次 pooling 到 latent_hw）
 python train_map_optical.py \
   --config ./configs/map_optical_mnist.yaml \
   --data_root ./data \
@@ -189,6 +189,6 @@ python analyze_map.py --config ./configs/map_optical_mnist.yaml --checkpoint ./o
 
 ## 7) 备注
 
-- `roi_hw` 是额外视场裁剪，不是传播 padding 的解 padding。
 - `pad/unpad` 在 `angular_spectrum_propagate` 内部完成。
-- 推荐优先用 `pool_kernel == pool_stride` 直接把 `resize_hw` 降到 `latent_hw`，减少数字后处理插值。
+- 推荐优先用 `pool_kernel == pool_stride` 直接把 `resize_hw` 降到 `latent_hw`，不做额外数字后处理缩放。
+- 若要关闭池化，设 `pool_type=none`，并把 `latent_hw` 设成与解 padding 后光场一致的尺寸。

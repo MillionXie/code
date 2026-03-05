@@ -8,11 +8,11 @@ import torch
 from tqdm import tqdm
 
 from data.datasets import get_dataloaders
-from models import OpticalOLSAdapter, VAEMapCore
 from utils.config import load_config
 from utils.io import flatten_dict, now_timestamp, save_json, write_summary_csv
 from utils.logger import create_logger
 from utils.losses_optical import kl_latent_intensity_biased_gaussian, kl_map_gaussian_prior
+from utils.map_optical import build_map_core_from_cfg, build_optical_adapter_from_cfg
 from utils.metrics import mse_loss, psnr_from_mse
 from utils.seed import set_seed
 from utils.viz import plot_eigen_spectrum, plot_histogram, plot_scatter_2d
@@ -45,54 +45,11 @@ def select_device() -> torch.device:
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-def build_model(cfg: dict, dataset_info: dict) -> VAEMapCore:
-    model_cfg = cfg.get("model", {})
-    return VAEMapCore(
-        in_channels=int(dataset_info["in_channels"]),
-        input_size=tuple(dataset_info["image_size"]),
-        latent_channels=int(model_cfg.get("latent_channels", 16)),
-        latent_hw=tuple(model_cfg.get("latent_hw", [4, 4])),
-        encoder_channels=tuple(model_cfg.get("encoder_channels", [32, 64])),
-        decoder_channels=tuple(model_cfg.get("decoder_channels", [256, 128, 64, 32])),
-        decoder_mode=str(model_cfg.get("decoder_mode", "deconv")),
-        out_range=str(cfg.get("data", {}).get("out_range", "zero_one")),
-    )
-
-
-def build_optical_adapter_if_needed(cfg: dict, model: VAEMapCore):
+def build_optical_adapter_if_needed(cfg: dict, model):
     optics_cfg = cfg.get("optics", None)
     if not optics_cfg:
         return None
-
-    direct_mode = str(optics_cfg.get("direct_mode", "latent_hw")).lower()
-    sensor_cfg = optics_cfg.get("sensor", {})
-    if direct_mode == "latent_hw":
-        out_hw_cfg = sensor_cfg.get("out_hw", None)
-        if out_hw_cfg is not None:
-            out_hw = tuple(out_hw_cfg)
-            if out_hw != tuple(model.latent_hw):
-                raise ValueError(
-                    "optics.sensor.out_hw {} must equal model.latent_hw {} when explicitly enabled in optics.direct_mode='latent_hw'".format(
-                        out_hw, tuple(model.latent_hw)
-                    )
-                )
-
-    return OpticalOLSAdapter(
-        latent_shape=(model.latent_channels, model.latent_hw[0], model.latent_hw[1]),
-        resize_hw=tuple(optics_cfg.get("resize_hw", [model.latent_hw[0], model.latent_hw[1]])),
-        field_init_mode=str(optics_cfg.get("field_init_mode", "real")),
-        direct_mode=direct_mode,
-        wavelength_nm=float(optics_cfg.get("wavelength_nm", 532.0)),
-        pixel_pitch_um=float(optics_cfg.get("pixel_pitch_um", 8.0)),
-        z1_mm=float(optics_cfg.get("z1_mm", 20.0)),
-        z2_mm=float(optics_cfg.get("z2_mm", 20.0)),
-        pad_factor=float(optics_cfg.get("pad_factor", 2.0)),
-        bandlimit=bool(optics_cfg.get("bandlimit", True)),
-        upsample_factor=int(optics_cfg.get("upsample_factor", 1)),
-        scatter_cfg=optics_cfg.get("scatter", {}),
-        sensor_cfg=sensor_cfg,
-        output_center=bool(optics_cfg.get("output_center", True)),
-    )
+    return build_optical_adapter_from_cfg(cfg, model)
 
 
 def pca_2d(x: np.ndarray, seed: int) -> np.ndarray:
@@ -134,7 +91,7 @@ def main() -> None:
         image_size=cfg.get("data", {}).get("image_size", [64, 64]),
     )
 
-    model = build_model(cfg, dataset_info).to(device)
+    model = build_map_core_from_cfg(cfg, dataset_info).to(device)
     checkpoint = torch.load(ckpt_path, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.eval()

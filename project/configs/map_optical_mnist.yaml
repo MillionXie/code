@@ -45,17 +45,14 @@ loss:
     var_mode: constant
     # if omitted, train_map_optical uses var0 = prior_sigma0^2 by default.
     var0: 1.0
-    # For sensor.normalize=mean, final_latent has sample mean near 1.0.
+    # With pre_norm=mean, m0=1.0 is a natural centered choice.
     m0: 1.0
     prior_sigma0: 1.0
-    pre_norm: none
+    pre_norm: mean
     clamp_nonnegative: true
 
 optics:
   field_init_mode: real
-  direct_mode: latent_hw
-  # full-res optional combo:
-  # direct_mode: full_res
   resize_hw: [80, 80]
   # NOTE: pad/unpad is handled only inside angular_spectrum_propagate.
   wavelength_nm: 532.0
@@ -65,34 +62,20 @@ optics:
   pad_factor: 2.0
   bandlimit: true
   upsample_factor: 1
-  # Keep decoder input non-negative for physical latent semantics.
-  output_center: false
   scatter:
     type: correlated_phase
     static: true
     phase_sigma: 1.0
     corr_len_px: 3.0
   sensor:
-    # roi_hw is optional extra FOV crop (NOT pad/unpad). Keep null by default.
-    roi_hw: null
+    # No ROI crop / no extra interpolation: intensity -> pooling -> latent.
     pool_type: avg
-    # Microlens-array style one-shot block aggregation: 64 -> 4 uses kernel=stride=16.
-    # For latent_hw=[8,8], set kernel=stride=8.
+    # If you want no pooling, set pool_type: none and make latent_hw == resize_hw.
+    # 80x80 field -> 10x10 latent in one step.
     pool_kernel: 8
     pool_stride: 8
     # mean: block average; sum: block integral (ablation).
     pool_reduce: mean
-    # out_hw is optional digital resize post-processing; keep null by default.
-    out_hw: null
-    # only used when optics.direct_mode == full_res
-    full_res_source: roi_intensity
-    normalize: mean
-    noise_model: none
-    poisson_scale: 1.0
-    read_noise_std: 0.0
-
-viz:
-  optics_show: simple
 
 sample:
   n_samples: 64

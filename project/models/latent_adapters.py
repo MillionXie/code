@@ -27,7 +27,7 @@ class IdentityAdapter(nn.Module):
 class OpticalOLSAdapter(nn.Module):
     """
     Optical latent adapter pipeline:
-    resize -> propagate -> scatter -> propagate -> detect -> roi/pool -> decoder-size map.
+    resize -> propagate -> scatter -> propagate -> detect intensity -> optional pooling -> decoder latent map.
     """
 
     def __init__(
@@ -35,7 +35,6 @@ class OpticalOLSAdapter(nn.Module):
         latent_shape: Tuple[int, int, int],
         resize_hw: Optional[Tuple[int, int]],
         field_init_mode: str,
-        direct_mode: str,
         wavelength_nm: float,
         pixel_pitch_um: float,
         z1_mm: float,
@@ -45,13 +44,11 @@ class OpticalOLSAdapter(nn.Module):
         upsample_factor: int = 1,
         scatter_cfg: Optional[Dict[str, Any]] = None,
         sensor_cfg: Optional[Dict[str, Any]] = None,
-        output_center: bool = False,
     ):
         super().__init__()
         self.latent_channels, self.latent_h, self.latent_w = latent_shape
         self.resize_hw = resize_hw
         self.field_init_mode = str(field_init_mode).lower()
-        self.direct_mode = str(direct_mode).lower()
 
         self.wavelength_nm = float(wavelength_nm)
         self.pixel_pitch_um = float(pixel_pitch_um)
@@ -60,16 +57,11 @@ class OpticalOLSAdapter(nn.Module):
         self.pad_factor = float(pad_factor)
         self.bandlimit = bool(bandlimit)
         self.upsample_factor = int(max(1, upsample_factor))
-        self.output_center = bool(output_center)
 
         scatter_cfg = scatter_cfg or {"type": "iid_phase"}
         sensor_cfg = sensor_cfg or {}
-        self.full_res_source = str(sensor_cfg.get("full_res_source", "roi_intensity")).lower()
-
         self.scatterer = build_scatterer(scatter_cfg, self.wavelength_nm, self.pixel_pitch_um)
 
-        roi_hw = sensor_cfg.get("roi_hw", None)
-        out_hw = sensor_cfg.get("out_hw", None)
         pool_kernel = sensor_cfg.get("pool_kernel", 2)
         pool_stride = sensor_cfg.get("pool_stride", 2)
         if isinstance(pool_kernel, list):
@@ -77,17 +69,11 @@ class OpticalOLSAdapter(nn.Module):
         if isinstance(pool_stride, list):
             pool_stride = tuple(pool_stride)
         self.sensor = IntensitySensor(
-            roi_hw=tuple(roi_hw) if roi_hw is not None else None,
             pool_type=str(sensor_cfg.get("pool_type", "avg")).lower(),
             pool_kernel=pool_kernel,
             pool_stride=pool_stride,
             pool_reduce=str(sensor_cfg.get("pool_reduce", "mean")).lower(),
-            out_hw=tuple(out_hw) if out_hw is not None else None,
-            expected_hw=(self.latent_h, self.latent_w) if self.direct_mode == "latent_hw" else None,
-            normalize=str(sensor_cfg.get("normalize", "mean")).lower(),
-            noise_model=str(sensor_cfg.get("noise_model", "none")).lower(),
-            poisson_scale=float(sensor_cfg.get("poisson_scale", 1.0)),
-            read_noise_std=float(sensor_cfg.get("read_noise_std", 0.0)),
+            expected_hw=(self.latent_h, self.latent_w),
         )
 
     def _to_complex_field(self, z_map: torch.Tensor) -> torch.Tensor:
@@ -137,9 +123,8 @@ class OpticalOLSAdapter(nn.Module):
         )
         I3 = detect_intensity(E3)
 
-        sensor_final_map, sensor_info = self.sensor(I3, return_info=True)
+        latent_map, sensor_info = self.sensor(I3, return_info=True)
         latent_intensity_map = sensor_info["latent_intensity_map"]
-        roi_intensity = sensor_info["roi_intensity"]
 
         if latent_intensity_map.shape[1] != self.latent_channels:
             raise ValueError(
@@ -148,36 +133,7 @@ class OpticalOLSAdapter(nn.Module):
                 )
             )
 
-        if self.direct_mode == "latent_hw":
-            final_latent_map = sensor_final_map
-            if final_latent_map.shape[-2:] != (self.latent_h, self.latent_w):
-                raise ValueError(
-                    "Optical sensor output size {} does not match latent_hw {}. "
-                    "请通过 pool_kernel/pool_stride 让 pooled size == latent_hw，或显式设置 out_hw 做数字缩放。".format(
-                        tuple(final_latent_map.shape[-2:]), (self.latent_h, self.latent_w)
-                    )
-                )
-            if latent_intensity_map.shape[-2:] != (self.latent_h, self.latent_w):
-                raise ValueError(
-                    "Optical latent intensity size {} does not match latent_hw {}. "
-                    "请通过 pool_kernel/pool_stride 让 pooled size == latent_hw，或显式设置 out_hw 做数字缩放。".format(
-                        tuple(latent_intensity_map.shape[-2:]), (self.latent_h, self.latent_w)
-                    )
-                )
-            if self.output_center:
-                final_latent_map = final_latent_map - final_latent_map.mean(dim=(-2, -1), keepdim=True)
-        elif self.direct_mode == "full_res":
-            if self.full_res_source == "roi_intensity":
-                final_latent_map = sensor_info["roi_intensity"]
-            elif self.full_res_source == "pooled_intensity":
-                final_latent_map = sensor_info["pooled_intensity"]
-            elif self.full_res_source in ("final_intensity", "sensor_final"):
-                final_latent_map = sensor_info["final_intensity"]
-            else:
-                raise ValueError("Unsupported sensor.full_res_source: {}".format(self.full_res_source))
-            # Keep physical semantics in full-res mode: no centering on intensity maps.
-        else:
-            raise ValueError("Unsupported optics.direct_mode: {}".format(self.direct_mode))
+        final_latent_map = latent_map
 
         if final_latent_map.shape[1] != self.latent_channels:
             raise ValueError(
@@ -186,8 +142,8 @@ class OpticalOLSAdapter(nn.Module):
 
         if return_info:
             return final_latent_map, {
-                "stage_intensity_names": ["input", "prop1", "scatter", "prop2", "sensor_roi"],
-                "stage_intensity_maps": [I0, I1, I2, I3, roi_intensity],
+                "stage_intensity_names": ["field_input", "prop1", "scatter", "prop2", "latent"],
+                "stage_intensity_maps": [I0, I1, I2, I3, latent_intensity_map],
                 "latent_intensity_map": latent_intensity_map,
                 "final_latent_map": final_latent_map,
                 "sensor": sensor_info,
