@@ -30,7 +30,7 @@ loss:
   prior:
     type: biased_gaussian
     mu0: 0.3
-    sigma: 1.0
+    sigma: 0.10
     apply_smooth_in_train: false
     spatial_smooth:
       type: gaussian
@@ -43,9 +43,9 @@ loss:
     var_mode: constant
     # If omitted, var0 defaults to posterior_sigma^2.
     # var0: 0.01
-    m0: 1.0
-    prior_sigma0: 1.0
-    pre_norm: mean
+    m0: 0.30
+    prior_sigma0: 0.10
+    pre_norm: none
     clamp_nonnegative: true
 
 optics:

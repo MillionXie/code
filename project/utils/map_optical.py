@@ -96,6 +96,7 @@ def evaluate_map_loader(
 @torch.no_grad()
 def save_optical_stage_visualization(
     inputs: torch.Tensor,
+    recons: torch.Tensor,
     optics_info: dict,
     path: Path,
     max_items: int = 6,
@@ -133,23 +134,32 @@ def save_optical_stage_visualization(
             resized.append(r)
         return torch.cat(resized, dim=0)
 
-    field_input = stages[stage_names.index("field_input")] if "field_input" in stage_names else stages[0]
-    scatter = stages[stage_names.index("scatter")] if "scatter" in stage_names else stages[min(len(stages) - 1, 2)]
+    before_scatter = (
+        stages[stage_names.index("before_scatter")]
+        if "before_scatter" in stage_names
+        else stages[min(len(stages) - 1, 2)]
+    )
+    sensor_pre_pool = (
+        stages[stage_names.index("sensor_pre_pool")]
+        if "sensor_pre_pool" in stage_names
+        else stages[min(len(stages) - 1, 3)]
+    )
 
     rows = [
         _prepare_image_row(inputs),
-        _prepare_map_row(field_input, use_log1p=True),
-        _prepare_map_row(scatter, use_log1p=True),
+        _prepare_map_row(before_scatter, use_log1p=True),
+        _prepare_map_row(sensor_pre_pool, use_log1p=True),
         _prepare_map_row(latent_mean, use_log1p=True),
+        _prepare_image_row(recons),
     ]
     grid = _stack_rows(rows)
     save_image_grid(grid, path=path, nrow=max_items, out_range="zero_one")
 
     if logger is not None:
         logger.info(
-            "optics.png semantics: 4 rows x %d cols, channel0 only; "
-            "rows=[input_image, field_input_intensity(before_propagation), "
-            "scatter_intensity(after_scatter), latent_mean_map(positive_mu_for_decoder_sampling)], cols=samples",
+            "optics.png semantics: 5 rows x %d cols, channel0 only; "
+            "rows=[input_image, before_scatter_field_intensity, "
+            "post_scatter_propagated_intensity(pre_pool), latent_mean_map(post_pool), reconstruction], cols=samples",
             max_items,
         )
 
@@ -204,6 +214,7 @@ def save_epoch_visuals_optical(
 
     save_optical_stage_visualization(
         inputs=fixed_inputs,
+        recons=recon_fixed,
         optics_info=info_fixed,
         path=optics_dir / "epoch_{:03d}_optics.png".format(epoch),
         max_items=6,

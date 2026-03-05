@@ -178,9 +178,13 @@ class OpticalOLSAdapter(nn.Module):
             bandlimit=self.bandlimit,
             upsample_factor=self.upsample_factor,
         )
+        I_before_scatter = detect_intensity(E)
+        stage_names.append("before_scatter")
+        stage_maps.append(I_before_scatter)
+
         E = self.scatterer(E)
         I_scatter = detect_intensity(E)
-        stage_names.append("scatter")
+        stage_names.append("after_scatter")
         stage_maps.append(I_scatter)
 
         E = angular_spectrum_propagate(
@@ -193,7 +197,7 @@ class OpticalOLSAdapter(nn.Module):
             upsample_factor=self.upsample_factor,
         )
         I_sensor = detect_intensity(E)
-        stage_names.append("sensor")
+        stage_names.append("sensor_pre_pool")
         stage_maps.append(I_sensor)
 
         latent_mean_map, sensor_info = self.sensor(I_sensor, return_info=True)

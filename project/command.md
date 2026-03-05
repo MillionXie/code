@@ -192,5 +192,6 @@ python analyze_map.py --config ./configs/map_optical_mnist.yaml --checkpoint ./o
 - `pad/unpad` 在 `angular_spectrum_propagate` 内部完成。
 - 当前默认光学 encoder：`(prop+phase)x2` + `scatter(static)` + `sensor pooling`。
 - KL 作用在散射后潜空间均值 `mu_w`，posterior 方差由 `loss.posterior_sigma` 固定。
+- `sample_map_optical.py` 直接从先验 `P(z)=N(m0, prior_sigma0^2)` 采样后送 decoder（不再走光学链路）。
 - 推荐优先用 `pool_kernel == pool_stride` 直接把 `resize_hw` 降到 `latent_hw`，不做额外数字后处理缩放。
 - 若要关闭池化，设 `pool_type=none`，并把 `latent_hw` 设成与解 padding 后光场一致的尺寸。

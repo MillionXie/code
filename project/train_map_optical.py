@@ -150,6 +150,10 @@ def main() -> None:
     trainable_params = count_trainable_params(model) + count_trainable_params(adapter)
     logger.info("Trainable parameters: %d", trainable_params)
     logger.info("Model trainable modules: decoder + optical adapter (encoder frozen)")
+    logger.info(
+        "Optical mode model config usage: latent_channels/latent_hw/decoder_* are active; "
+        "encoder_channels are kept for compatibility but not used in optical forward."
+    )
 
     train_params = [p for p in model.parameters() if p.requires_grad] + [p for p in adapter.parameters() if p.requires_grad]
     optimizer = optim.Adam(train_params, lr=float(train_cfg.get("lr", 1e-3)))
@@ -189,7 +193,18 @@ def main() -> None:
         kl_clamp_nonnegative,
         posterior_sigma,
     )
-    logger.info("Sampling | prior_space=%s", sample_prior_space)
+    logger.info(
+        "Sampling | prior_space=%s P(z)=N(mu0=%.6f, sigma=%.6f)",
+        sample_prior_space,
+        float(decoder_prior_cfg.get("mu0", 0.0)),
+        float(decoder_prior_cfg.get("sigma", 1.0)),
+    )
+    if kl_pre_norm != "none":
+        logger.warning(
+            "KL pre_norm=%s may improve stability but can weaken absolute-scale matching to sampling prior. "
+            "If sampling quality is poor, try loss.kl_w.pre_norm=none.",
+            kl_pre_norm,
+        )
 
     epochs = int(train_cfg.get("epochs", 30))
     data_range = float(dataset_info.get("data_range", 1.0))

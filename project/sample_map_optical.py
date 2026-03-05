@@ -72,6 +72,12 @@ def main() -> None:
         "sigma": float(klw_cfg.get("prior_sigma0", prior_cfg.get("sigma", 1.0))),
         "spatial_smooth": prior_cfg.get("spatial_smooth", {}),
     }
+    logger.info(
+        "Sampling from prior P(z)=N(mu0=%.6f, sigma=%.6f) | kl_target=%s",
+        float(decoder_prior_cfg["mu0"]),
+        float(decoder_prior_cfg["sigma"]),
+        kl_target,
+    )
 
     with torch.no_grad():
         z_mid = sample_map_prior(

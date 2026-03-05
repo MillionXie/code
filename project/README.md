@@ -225,3 +225,4 @@ python analyze_map.py \
 - KL 在 `mu_w` 上按 biased Gaussian prior 计算（`m0`,`prior_sigma0` 由配置指定）。
 - 默认不做 ROI 裁剪、不做额外插值缩放；建议只用一次 `pool_kernel == pool_stride` 的 pooling 直接把 `resize_hw` 降到 `model.latent_hw`（微透镜阵列规则分块汇聚）。
 - 若不想池化，设 `optics.sensor.pool_type: none`，并让 `model.latent_hw` 与解 padding 后的光场尺寸一致。
+- 每个 epoch 的 `optics/epoch_xxx_optics.png` 包含 5 行：`原图`、`散射前光场`、`散射后传播到探测面的强度(池化前)`、`潜空间均值mu_w(池化后)`、`重建图`。
