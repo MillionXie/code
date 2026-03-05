@@ -6,7 +6,7 @@ from .scattering import (
     IdentityScattering,
     build_scatterer,
 )
-from .sensor import IntensitySensor, center_crop, detect_intensity
+from .sensor import IntensitySensor, detect_intensity
 
 __all__ = [
     "angular_spectrum_propagate",
@@ -16,6 +16,5 @@ __all__ = [
     "AngleLimitedScattering",
     "build_scatterer",
     "detect_intensity",
-    "center_crop",
     "IntensitySensor",
 ]
