@@ -80,11 +80,9 @@ def _build_label_panels(
     valid_base = [int(x) for x in base_labels if int(x) in available_labels]
     if len(valid_base) < 4:
         valid_base = available_labels[:4]
-    panels.append(valid_base[:4])
-
-    for _ in range(max(int(n_panels) - 1, 0)):
-        picks = rng.choice(available_labels, size=4, replace=False).tolist()
-        panels.append([int(x) for x in picks])
+    fixed = valid_base[:4]
+    for _ in range(max(int(n_panels), 1)):
+        panels.append(list(fixed))
     return panels
 
 
@@ -355,6 +353,7 @@ def main() -> None:
             "grid_size": int(args.interp_grid_size),
             "requested_panels": int(args.n_interp_panels),
             "saved_panels": len(panel_rows),
+            "panel_label_mode": "fixed_base_labels",
             "base_corner_labels": [int(x) for x in base_labels],
             "aggregate_smoothness": interp_agg,
             "panels": panel_rows,
