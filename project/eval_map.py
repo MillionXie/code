@@ -41,6 +41,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interp_labels", type=str, default="0,1,2,3")
     parser.add_argument("--n_interp_panels", type=int, default=8)
     parser.add_argument("--class_bank_per_label", type=int, default=32)
+    parser.add_argument("--use_checkpoint_config", action="store_true", default=True)
+    parser.add_argument("--no_checkpoint_config", dest="use_checkpoint_config", action="store_false")
     return parser.parse_args()
 
 
@@ -86,6 +88,26 @@ def _build_label_panels(
     return panels
 
 
+def _select_class_prototype(
+    model,
+    adapter,
+    mode: str,
+    candidates: list[torch.Tensor],
+    device: torch.device,
+) -> torch.Tensor:
+    if len(candidates) == 0:
+        raise RuntimeError("Cannot select prototype from empty candidates.")
+
+    with torch.no_grad():
+        batch = torch.cat(candidates, dim=0).to(device)
+        z = _get_eval_latent(model, adapter, mode, batch)
+        zf = z.flatten(start_dim=1)
+        center = zf.mean(dim=0, keepdim=True)
+        dist = (zf - center).pow(2).sum(dim=1)
+        idx = int(torch.argmin(dist).item())
+    return candidates[idx]
+
+
 def _get_eval_latent(model, adapter, mode: str, x: torch.Tensor) -> torch.Tensor:
     if mode == "optical":
         z_mid, info = adapter.encode_from_input(x, return_info=True, sample_posterior=False)
@@ -109,12 +131,20 @@ def main() -> None:
     args = parse_args()
     set_seed(args.seed)
 
-    cfg = load_config(args.config)
+    ckpt_path = Path(args.checkpoint)
+    checkpoint = torch.load(ckpt_path, map_location="cpu")
+
+    cfg_file = load_config(args.config)
+    ckpt_cfg = checkpoint.get("config", None)
+    if args.use_checkpoint_config and isinstance(ckpt_cfg, dict):
+        cfg = ckpt_cfg
+    else:
+        cfg = cfg_file
+
     dataset = args.dataset or cfg.get("dataset", None)
     if dataset is None:
-        raise ValueError("dataset missing in config and CLI")
+        raise ValueError("dataset missing in config/checkpoint and CLI")
 
-    ckpt_path = Path(args.checkpoint)
     if args.outdir is None:
         args.outdir = str(ckpt_path.parent / "eval_map_{}_{}".format(args.mode, now_timestamp()))
 
@@ -161,6 +191,7 @@ def main() -> None:
 
     recon_inputs = []
     recon_outputs = []
+    recon_labels = []
     recon_collected = 0
 
     class_bank: dict[int, list[torch.Tensor]] = {}
@@ -185,6 +216,7 @@ def main() -> None:
                 take = min(int(args.num_recon_images) - recon_collected, x.size(0))
                 recon_inputs.append(x[:take].detach().cpu())
                 recon_outputs.append(recon[:take].detach().cpu())
+                recon_labels.append(y[:take].detach().cpu())
                 recon_collected += take
 
             y_cpu = y.cpu()
@@ -201,12 +233,29 @@ def main() -> None:
 
     recon_saved = 0
     if len(recon_inputs) > 0 and len(recon_outputs) > 0:
+        recon_input_cat = torch.cat(recon_inputs, dim=0)
+        recon_output_cat = torch.cat(recon_outputs, dim=0)
+        recon_label_cat = torch.cat(recon_labels, dim=0) if len(recon_labels) > 0 else None
+
+        if recon_label_cat is not None:
+            order = torch.argsort(recon_label_cat)
+            recon_input_cat = recon_input_cat[order]
+            recon_output_cat = recon_output_cat[order]
+
         recon_saved = save_reconstruction_pairs(
-            inputs=torch.cat(recon_inputs, dim=0),
-            recons=torch.cat(recon_outputs, dim=0),
-            path=recon_dir / "reconstruction_pairs.png",
+            inputs=recon_input_cat,
+            recons=recon_output_cat,
+            path=recon_dir / "reconstruction_pairs_sorted.png",
             max_items=int(args.num_recon_images),
             pairs_per_row=int(args.recon_pairs_per_row),
+            out_range=out_range,
+        )
+        save_reconstruction_pairs(
+            inputs=recon_input_cat,
+            recons=recon_output_cat,
+            path=recon_dir / "reconstruction_pairs_preview.png",
+            max_items=min(16, int(args.num_recon_images)),
+            pairs_per_row=4,
             out_range=out_range,
         )
 
@@ -215,9 +264,19 @@ def main() -> None:
     available_labels = sorted([int(k) for k, v in class_bank.items() if len(v) > 0])
     label_panels = _build_label_panels(available_labels, base_labels, int(args.n_interp_panels), rng)
 
+    prototypes: dict[int, torch.Tensor] = {}
+    for label in available_labels:
+        prototypes[label] = _select_class_prototype(
+            model=model,
+            adapter=adapter,
+            mode=args.mode,
+            candidates=class_bank[label],
+            device=device,
+        )
+
     panel_rows = []
     for panel_idx, labels in enumerate(label_panels):
-        corners = _sample_corner_images(class_bank, labels, rng)
+        corners = [prototypes[int(lb)] for lb in labels]
         tl, tr, bl, br = corners[0], corners[1], corners[2], corners[3]
 
         with torch.no_grad():
@@ -255,6 +314,10 @@ def main() -> None:
             }
         )
 
+    if len(panel_rows) > 0:
+        (interp_dir / "interp_panel_main.png").write_bytes((interp_dir / "interp_panel_000.png").read_bytes())
+        (interp_dir / "interp_panel_main_corners.png").write_bytes((interp_dir / "interp_panel_000_corners.png").read_bytes())
+
     interp_agg = {}
     if len(panel_rows) > 0:
         keys = list(panel_rows[0]["smoothness"].keys())
@@ -285,7 +348,8 @@ def main() -> None:
             "requested": int(args.num_recon_images),
             "saved_pairs": int(recon_saved),
             "pairs_per_row": int(args.recon_pairs_per_row),
-            "artifact": str(recon_dir / "reconstruction_pairs.png"),
+            "artifact_sorted": str(recon_dir / "reconstruction_pairs_sorted.png"),
+            "artifact_preview": str(recon_dir / "reconstruction_pairs_preview.png"),
         },
         "interpolation": {
             "grid_size": int(args.interp_grid_size),
@@ -299,6 +363,8 @@ def main() -> None:
             "per_sample_metrics_csv": str(outdir / "per_sample_metrics.csv"),
             "reconstruction_dir": str(recon_dir),
             "interpolation_dir": str(interp_dir),
+            "interp_main_panel": str(interp_dir / "interp_panel_main.png") if len(panel_rows) > 0 else None,
+            "interp_main_corners": str(interp_dir / "interp_panel_main_corners.png") if len(panel_rows) > 0 else None,
         },
     }
 
