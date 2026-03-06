@@ -55,7 +55,7 @@ optics:
     trainable: true
     init: uniform
   z_to_scatter_mm: 20.0
-  z_to_sensor_mm: 5.0
+  z_to_sensor_mm: 20.0
   posterior_sigma: 0.10
   decoder:
     field_init_mode: sqrt_positive

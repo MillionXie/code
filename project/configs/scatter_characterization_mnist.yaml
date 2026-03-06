@@ -1,0 +1,35 @@
+dataset: mnist
+data_root: ./data
+sample_index: 0
+seed: 42
+outdir: null
+
+data:
+  resize_hw: [64, 64]
+  eps: 1.0e-8
+
+optics:
+  wavelength_nm: 532.0
+  pixel_pitch_um: 8.0
+  z1_mm: 20.0
+  z2_mm: 20.0
+  pad_factor: 2.0
+  bandlimit: true
+  upsample_factor: 1
+
+scatter:
+  static: true
+  phase_mode: uniform
+  sigma_phi: 1.0
+  lc_list: [1.0, 3.0, 5.0]
+
+pooling:
+  use_pooling: true
+  pool_type: avg
+  pool_kernel: 8
+  pool_stride: 8
+  pool_reduce: mean
+
+memory_effect:
+  dx_list: [-6, -4, -2, 0, 2, 4, 6]
+  dy: 0
