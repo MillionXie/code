@@ -31,8 +31,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--outdir", type=str, default=None)
-    parser.add_argument("--run_tsne", action="store_true")
+    parser.add_argument("--run_tsne", dest="run_tsne", action="store_true")
+    parser.add_argument("--no_tsne", dest="run_tsne", action="store_false")
     parser.add_argument("--max_points", type=int, default=5000)
+    parser.add_argument("--tsne_points", type=int, default=3000)
+    parser.set_defaults(run_tsne=True)
     return parser.parse_args()
 
 
@@ -97,6 +100,8 @@ def main() -> None:
     logvar_list = []
     label_list = []
     kl_list = []
+    mse_list = []
+    psnr_list = []
 
     mse_sum = 0.0
     psnr_sum = 0.0
@@ -106,7 +111,8 @@ def main() -> None:
     with torch.no_grad():
         for x, y in tqdm(test_loader, desc="Extracting latents", leave=False):
             x = x.to(device, non_blocking=True)
-            recon, mu, logvar, _ = model(x)
+            mu, logvar = model.encode(x)
+            recon = model.decode(mu)
 
             mse_per_sample = mse_loss(recon, x, reduction="none")
             psnr_per_sample = psnr_from_mse(mse_per_sample, data_range=data_range)
@@ -120,11 +126,15 @@ def main() -> None:
             logvar_list.append(logvar.cpu().numpy())
             label_list.append(y.numpy())
             kl_list.append(kl_per_sample.cpu().numpy())
+            mse_list.append(mse_per_sample.cpu().numpy())
+            psnr_list.append(psnr_per_sample.cpu().numpy())
 
     mu_all = np.concatenate(mu_list, axis=0)
     logvar_all = np.concatenate(logvar_list, axis=0)
     labels_all = np.concatenate(label_list, axis=0)
     kl_all = np.concatenate(kl_list, axis=0)
+    mse_all = np.concatenate(mse_list, axis=0)
+    psnr_all = np.concatenate(psnr_list, axis=0)
 
     mu_dim_mean = mu_all.mean(axis=0)
     mu_dim_var = mu_all.var(axis=0)
@@ -175,11 +185,24 @@ def main() -> None:
         title="PCA (2D) of Latent mu",
         labels=labels_vis,
     )
+    pca_rows = []
+    for idx in range(len(pca_points)):
+        pca_rows.append(
+            {
+                "index": int(idx),
+                "label": int(labels_vis[idx]),
+                "x": float(pca_points[idx, 0]),
+                "y": float(pca_points[idx, 1]),
+            }
+        )
+    write_summary_csv(outdir / "embedding_pca.csv", pca_rows)
 
     tsne_saved = False
+    tsne_points = None
+    labels_tsne = None
     if args.run_tsne:
         if SKLEARN_AVAILABLE:
-            tsne_n = min(len(mu_vis), 3000)
+            tsne_n = min(len(mu_vis), int(args.tsne_points))
             tsne_idx = rng.choice(len(mu_vis), size=tsne_n, replace=False) if len(mu_vis) > tsne_n else np.arange(len(mu_vis))
             mu_tsne = mu_vis[tsne_idx]
             labels_tsne = labels_vis[tsne_idx]
@@ -191,9 +214,62 @@ def main() -> None:
                 title="t-SNE (2D) of Latent mu",
                 labels=labels_tsne,
             )
+            tsne_rows = []
+            for idx in range(len(tsne_points)):
+                tsne_rows.append(
+                    {
+                        "index": int(idx),
+                        "label": int(labels_tsne[idx]),
+                        "x": float(tsne_points[idx, 0]),
+                        "y": float(tsne_points[idx, 1]),
+                    }
+                )
+            write_summary_csv(outdir / "embedding_tsne.csv", tsne_rows)
             tsne_saved = True
         else:
             logger.info("t-SNE skipped: scikit-learn is not installed.")
+
+    per_sample_rows = []
+    for idx in range(len(labels_all)):
+        per_sample_rows.append(
+            {
+                "index": int(idx),
+                "label": int(labels_all[idx]),
+                "mse": float(mse_all[idx]),
+                "psnr": float(psnr_all[idx]),
+                "kl": float(kl_all[idx]),
+            }
+        )
+    write_summary_csv(outdir / "per_sample_metrics.csv", per_sample_rows)
+
+    class_rows = []
+    for label in np.unique(labels_all):
+        mask = labels_all == label
+        class_rows.append(
+            {
+                "label": int(label),
+                "count": int(mask.sum()),
+                "mse_mean": float(mse_all[mask].mean()),
+                "psnr_mean": float(psnr_all[mask].mean()),
+                "kl_mean": float(kl_all[mask].mean()),
+                "mu_norm_mean": float(np.linalg.norm(mu_all[mask], axis=1).mean()),
+            }
+        )
+    write_summary_csv(outdir / "class_metrics.csv", class_rows)
+
+    np.savez_compressed(
+        outdir / "latent_arrays.npz",
+        mu=mu_all,
+        logvar=logvar_all,
+        labels=labels_all,
+        kl=kl_all,
+        mse=mse_all,
+        psnr=psnr_all,
+        pca_points=pca_points,
+        pca_labels=labels_vis,
+        tsne_points=tsne_points if tsne_points is not None else np.empty((0, 2), dtype=np.float32),
+        tsne_labels=labels_tsne if labels_tsne is not None else np.empty((0,), dtype=np.int64),
+    )
 
     summary = {
         "checkpoint": str(ckpt_path),
@@ -228,6 +304,11 @@ def main() -> None:
             "mu_cov_eigenspectrum": str(outdir / "mu_cov_eigenspectrum.png"),
             "pca_2d": str(outdir / "pca_2d.png"),
             "tsne_2d": str(outdir / "tsne_2d.png") if tsne_saved else None,
+            "latent_arrays_npz": str(outdir / "latent_arrays.npz"),
+            "per_sample_metrics_csv": str(outdir / "per_sample_metrics.csv"),
+            "class_metrics_csv": str(outdir / "class_metrics.csv"),
+            "embedding_pca_csv": str(outdir / "embedding_pca.csv"),
+            "embedding_tsne_csv": str(outdir / "embedding_tsne.csv") if tsne_saved else None,
         },
     }
 
