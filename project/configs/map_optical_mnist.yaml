@@ -16,7 +16,7 @@ model:
   # decoder_mode: conv_refine
 
 train:
-  epochs: 30
+  epochs: 50
   batch_size: 128
   lr: 0.001
   seed: 42
@@ -63,7 +63,7 @@ optics:
     trainable: true
     init: uniform
   z_to_scatter_mm: 20.0
-  z_to_sensor_mm: 1.0
+  z_to_sensor_mm: 5.0
   posterior_sigma: 0.10
   decoder:
     field_init_mode: sqrt_positive
@@ -78,13 +78,13 @@ optics:
   bandlimit: true
   upsample_factor: 1
   scatter:
-    type: correlated_phase
+    type: correlated_phase #iid_phase #iid_phase  
     static: true
     phase_sigma: 1.0
-    corr_len_px: 3.0
+    corr_len_px: 50.0
   sensor:
     # No ROI crop / no extra interpolation: intensity -> pooling -> latent.
-    pool_type: avg
+    pool_type: avg # none #
     # If you want no pooling, set pool_type: none and make latent_hw == resize_hw.
     # 200x200 field -> 10x10 latent in one step.
     pool_kernel: 20

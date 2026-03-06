@@ -7,7 +7,7 @@ data:
 model:
   arch: pure_optical
   latent_channels: 1
-  latent_hw: [200, 200]
+  latent_hw: [10, 10]
   # The following conv settings are ignored when arch=pure_optical (kept for compatibility).
   encoder_channels: [32, 64]
   decoder_channels: [256, 128, 64, 32]
@@ -55,7 +55,7 @@ optics:
     trainable: true
     init: uniform
   z_to_scatter_mm: 20.0
-  z_to_sensor_mm: 5.0
+  z_to_sensor_mm: 20.0
   posterior_sigma: 0.10
   decoder:
     field_init_mode: sqrt_positive
@@ -74,7 +74,7 @@ optics:
     phase_sigma: 1.0
     corr_len_px: 6.0
   sensor:
-    pool_type: none
+    pool_type: avg
     pool_kernel: 20
     pool_stride: 20
     pool_reduce: mean
