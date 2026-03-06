@@ -341,17 +341,17 @@ def run_experiment_memory_effect(
         raw_corr_list: List[float] = []
         comp_corr_list: List[float] = []
 
-        i_ref = None
+        # Always compute dx=0 reference first, so every curve has the same x-length.
+        x_ref = translate_zero_fill(i_in[0, 0], dx=0, dy=dy).unsqueeze(0).unsqueeze(0)
+        e_ref = build_complex_field_from_intensity(x_ref, eps=eps)
+        ref_out = _optical_forward(e_in=e_ref, scatter_cfg=case["scatter_cfg"], optics_cfg=optics_cfg, sensor=sensor)
+        i_ref = ref_out["I3"][0, 0]
+
         for dx in dx_list:
             x_shift = translate_zero_fill(i_in[0, 0], dx=dx, dy=dy).unsqueeze(0).unsqueeze(0)
             e_in = build_complex_field_from_intensity(x_shift, eps=eps)
             out = _optical_forward(e_in=e_in, scatter_cfg=case["scatter_cfg"], optics_cfg=optics_cfg, sensor=sensor)
             i3 = out["I3"][0, 0]
-
-            if dx == 0:
-                i_ref = i3
-            if i_ref is None:
-                continue
 
             raw = pearson_corr(i3, i_ref)
             comp = pearson_corr(translate_zero_fill(i3, dx=-dx, dy=-dy), i_ref)
