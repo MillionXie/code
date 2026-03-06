@@ -25,7 +25,7 @@ loss:
   alpha: 1.0
   beta: 1.0
   gamma: 0.1
-  posterior_sigma: 0.10
+  posterior_sigma: 0.05
   prior:
     type: biased_gaussian
     mu0: 0.1
@@ -55,7 +55,7 @@ optics:
     trainable: true
     init: uniform
   z_to_scatter_mm: 20.0
-  z_to_sensor_mm: 1.0
+  z_to_sensor_mm: 5.0
   posterior_sigma: 0.10
   decoder:
     field_init_mode: sqrt_positive
@@ -72,7 +72,7 @@ optics:
     type: correlated_phase
     static: true
     phase_sigma: 1.0
-    corr_len_px: 3.0
+    corr_len_px: 6.0
   sensor:
     pool_type: none
     pool_kernel: 20
