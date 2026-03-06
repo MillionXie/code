@@ -7,14 +7,14 @@ data:
 model:
   arch: pure_optical
   latent_channels: 1
-  latent_hw: [10, 10]
+  latent_hw: [200, 200]
   # The following conv settings are ignored when arch=pure_optical (kept for compatibility).
   encoder_channels: [32, 64]
   decoder_channels: [256, 128, 64, 32]
   decoder_mode: deconv
 
 train:
-  epochs: 30
+  epochs: 50
   batch_size: 128
   lr: 0.001
   seed: 42
@@ -28,8 +28,8 @@ loss:
   posterior_sigma: 0.10
   prior:
     type: biased_gaussian
-    mu0: 0.25
-    sigma: 0.10
+    mu0: 0.1
+    sigma: 0.050
     apply_smooth_in_train: false
     apply_smooth_in_sample: false
     spatial_smooth:
@@ -40,8 +40,8 @@ loss:
   kl_w:
     target: latent_mean
     var_mode: constant
-    m0: 0.25
-    prior_sigma0: 0.10
+    m0: 0.1
+    prior_sigma0: 0.05
     pre_norm: none
     clamp_nonnegative: true
 
@@ -65,7 +65,7 @@ optics:
     z_to_sensor_mm: 20.0
     trainable: true
     init: uniform
-  pad_factor: 2.0
+  pad_factor: 1.0
   bandlimit: true
   upsample_factor: 1
   scatter:
@@ -74,7 +74,7 @@ optics:
     phase_sigma: 1.0
     corr_len_px: 3.0
   sensor:
-    pool_type: avg
+    pool_type: none
     pool_kernel: 20
     pool_stride: 20
     pool_reduce: mean
