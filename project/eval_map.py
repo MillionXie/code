@@ -19,7 +19,7 @@ from utils.eval_tools import (
 from utils.io import flatten_dict, now_timestamp, save_json, write_summary_csv
 from utils.logger import create_logger
 from utils.map_optical import build_map_core_from_cfg, build_optical_adapter_from_cfg
-from utils.metrics import mse_loss, psnr_from_mse
+from utils.metrics import mse_loss, psnr_from_mse, ssim_score
 from utils.seed import set_seed
 from utils.viz import save_image_grid
 
@@ -181,10 +181,12 @@ def main() -> None:
     data_range = float(dataset_info["data_range"])
     mse_sum = 0.0
     psnr_sum = 0.0
+    ssim_sum = 0.0
     count = 0
 
     mse_all = []
     psnr_all = []
+    ssim_all = []
     labels_all = []
 
     recon_inputs = []
@@ -201,13 +203,16 @@ def main() -> None:
 
             mse_ps = mse_loss(recon, x, reduction="none")
             psnr_ps = psnr_from_mse(mse_ps, data_range=data_range)
+            ssim_ps = ssim_score(recon, x, data_range=data_range, reduction="none")
 
             mse_sum += mse_ps.sum().item()
             psnr_sum += psnr_ps.sum().item()
+            ssim_sum += ssim_ps.sum().item()
             count += x.size(0)
 
             mse_all.append(mse_ps.cpu())
             psnr_all.append(psnr_ps.cpu())
+            ssim_all.append(ssim_ps.cpu())
             labels_all.append(y.cpu())
 
             if recon_collected < int(args.num_recon_images):
@@ -227,6 +232,7 @@ def main() -> None:
 
     mse_np = torch.cat(mse_all, dim=0).numpy() if mse_all else np.zeros((0,), dtype=np.float32)
     psnr_np = torch.cat(psnr_all, dim=0).numpy() if psnr_all else np.zeros((0,), dtype=np.float32)
+    ssim_np = torch.cat(ssim_all, dim=0).numpy() if ssim_all else np.zeros((0,), dtype=np.float32)
     label_np = torch.cat(labels_all, dim=0).numpy() if labels_all else np.zeros((0,), dtype=np.int64)
 
     recon_saved = 0
@@ -330,6 +336,7 @@ def main() -> None:
                 "label": int(label_np[idx]),
                 "mse": float(mse_np[idx]),
                 "psnr": float(psnr_np[idx]),
+                "ssim": float(ssim_np[idx]),
             }
         )
     write_summary_csv(outdir / "per_sample_metrics.csv", per_sample_rows)
@@ -340,6 +347,7 @@ def main() -> None:
         "checkpoint": str(ckpt_path),
         "mse": mse_sum / max(count, 1),
         "psnr": psnr_sum / max(count, 1),
+        "ssim": ssim_sum / max(count, 1),
         "samples": count,
         "device": str(device),
         "reconstruction": {
@@ -371,9 +379,10 @@ def main() -> None:
     write_summary_csv(outdir / "summary.csv", [flatten_dict(metrics)])
 
     logger.info(
-        "Eval map done | mse=%.6f psnr=%.3f recon_pairs=%d interp_panels=%d",
+        "Eval map done | mse=%.6f psnr=%.3f ssim=%.4f recon_pairs=%d interp_panels=%d",
         metrics["mse"],
         metrics["psnr"],
+        metrics["ssim"],
         metrics["reconstruction"]["saved_pairs"],
         metrics["interpolation"]["saved_panels"],
     )

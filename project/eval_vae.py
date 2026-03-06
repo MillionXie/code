@@ -17,7 +17,7 @@ from utils.eval_tools import (
 )
 from utils.io import flatten_dict, now_timestamp, save_json, write_summary_csv
 from utils.logger import create_logger
-from utils.metrics import kl_divergence, mse_loss, psnr_from_mse
+from utils.metrics import kl_divergence, mse_loss, psnr_from_mse, ssim_score
 from utils.seed import set_seed
 from utils.viz import save_image_grid
 
@@ -137,11 +137,13 @@ def main() -> None:
     data_range = float(dataset_info["data_range"])
     mse_sum = 0.0
     psnr_sum = 0.0
+    ssim_sum = 0.0
     kl_sum = 0.0
     count = 0
 
     mse_all = []
     psnr_all = []
+    ssim_all = []
     kl_all = []
     labels_all = []
 
@@ -160,15 +162,18 @@ def main() -> None:
 
             mse_per_sample = mse_loss(recon, x, reduction="none")
             psnr_per_sample = psnr_from_mse(mse_per_sample, data_range=data_range)
+            ssim_per_sample = ssim_score(recon, x, data_range=data_range, reduction="none")
             kl_per_sample = kl_divergence(mu, logvar, reduction="none")
 
             mse_sum += mse_per_sample.sum().item()
             psnr_sum += psnr_per_sample.sum().item()
+            ssim_sum += ssim_per_sample.sum().item()
             kl_sum += kl_per_sample.sum().item()
             count += x.size(0)
 
             mse_all.append(mse_per_sample.cpu())
             psnr_all.append(psnr_per_sample.cpu())
+            ssim_all.append(ssim_per_sample.cpu())
             kl_all.append(kl_per_sample.cpu())
             labels_all.append(y.cpu())
 
@@ -189,6 +194,7 @@ def main() -> None:
 
     mse_np = torch.cat(mse_all, dim=0).numpy() if mse_all else np.zeros((0,), dtype=np.float32)
     psnr_np = torch.cat(psnr_all, dim=0).numpy() if psnr_all else np.zeros((0,), dtype=np.float32)
+    ssim_np = torch.cat(ssim_all, dim=0).numpy() if ssim_all else np.zeros((0,), dtype=np.float32)
     kl_np = torch.cat(kl_all, dim=0).numpy() if kl_all else np.zeros((0,), dtype=np.float32)
     label_np = torch.cat(labels_all, dim=0).numpy() if labels_all else np.zeros((0,), dtype=np.int64)
 
@@ -286,6 +292,7 @@ def main() -> None:
                 "label": int(label_np[idx]),
                 "mse": float(mse_np[idx]),
                 "psnr": float(psnr_np[idx]),
+                "ssim": float(ssim_np[idx]),
                 "kl": float(kl_np[idx]),
             }
         )
@@ -296,6 +303,7 @@ def main() -> None:
         "checkpoint": str(ckpt_path),
         "mse": mse_sum / max(count, 1),
         "psnr": psnr_sum / max(count, 1),
+        "ssim": ssim_sum / max(count, 1),
         "kl_mean": kl_sum / max(count, 1),
         "samples": count,
         "device": str(device),
@@ -328,9 +336,10 @@ def main() -> None:
     write_summary_csv(outdir / "summary.csv", [flatten_dict(metrics)])
 
     logger.info(
-        "Evaluation done | mse=%.6f psnr=%.3f kl=%.4f recon_pairs=%d interp_panels=%d",
+        "Evaluation done | mse=%.6f psnr=%.3f ssim=%.4f kl=%.4f recon_pairs=%d interp_panels=%d",
         metrics["mse"],
         metrics["psnr"],
+        metrics["ssim"],
         metrics["kl_mean"],
         metrics["reconstruction"]["saved_pairs"],
         metrics["interpolation"]["saved_panels"],
