@@ -7,7 +7,7 @@ data:
 model:
   arch: pure_optical
   latent_channels: 1
-  latent_hw: [10, 10]
+  latent_hw: [200, 200]
   # The following conv settings are ignored when arch=pure_optical (kept for compatibility).
   encoder_channels: [32, 64]
   decoder_channels: [256, 128, 64, 32]
@@ -69,12 +69,12 @@ optics:
   bandlimit: true
   upsample_factor: 1
   scatter:
-    type: correlated_phase
+    type: iid_phase #correlated_phase
     static: true
     phase_sigma: 1.0
     corr_len_px: 6.0
   sensor:
-    pool_type: avg
+    pool_type: none # avg
     pool_kernel: 20
     pool_stride: 20
     pool_reduce: mean

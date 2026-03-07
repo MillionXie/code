@@ -299,3 +299,25 @@ python optics/test_scattering_memory.py \
   --dynamic_scatter \
   --corr_lens_px 0.5,2.0,5.0
 ```
+
+
+python evaluate_compare_latents.py \
+  --config ./configs/analysis_compare_mnist.yaml \
+  --data_root ./data \
+  --outdir ./outputs/task4_mnist/compare
+
+python visualize_latent_fields.py \
+  --config ./configs/analysis_compare_mnist.yaml \
+  --data_root ./data \
+  --outdir ./outputs/task4_mnist/visualize \
+  --mode both
+
+python analyze_latent_structure.py \
+  --config ./configs/analysis_compare_mnist.yaml \
+  --data_root ./data \
+  --outdir ./outputs/task4_mnist/structure
+
+python analyze_latent_noise.py \
+  --config ./configs/analysis_compare_mnist.yaml \
+  --data_root ./data \
+  --outdir ./outputs/task4_mnist/noise

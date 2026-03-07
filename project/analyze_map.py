@@ -195,9 +195,9 @@ def main() -> None:
     plot_histogram(dim_var, outdir / "mu_dim_var_hist.png", "Histogram of Map-Latent Dimension Variances", "Variance")
     plot_histogram(kl_all, outdir / "kl_distribution_hist.png", "KL Distribution Across Samples", "KL")
 
-    cov = np.cov(mu_all, rowvar=False)
-    eigvals = np.linalg.eigvalsh(cov)[::-1]
-    plot_eigen_spectrum(eigvals, outdir / "mu_cov_eigenspectrum.png", "Eigenvalue Spectrum of Cov(mu_map)")
+    # cov = np.cov(mu_all, rowvar=False)
+    # eigvals = np.linalg.eigvalsh(cov)[::-1]
+    # plot_eigen_spectrum(eigvals, outdir / "mu_cov_eigenspectrum.png", "Eigenvalue Spectrum of Cov(mu_map)")
 
     rng = np.random.default_rng(args.seed)
     if len(mu_all) > args.max_points:
@@ -312,10 +312,10 @@ def main() -> None:
             "kl_std": float(kl_all.std()),
             "kl_min": float(kl_all.min()),
             "kl_max": float(kl_all.max()),
-            "cov_trace": float(np.trace(cov)),
-            "eig_max": float(eigvals.max()),
-            "eig_min": float(eigvals.min()),
-            "eig_top10": [float(x) for x in eigvals[:10]],
+            # "cov_trace": float(np.trace(cov)),
+            # "eig_max": float(eigvals.max()),
+            # "eig_min": float(eigvals.min()),
+            # "eig_top10": [float(x) for x in eigvals[:10]],
         },
         "artifacts": {
             "mu_dim_mean_hist": str(outdir / "mu_dim_mean_hist.png"),

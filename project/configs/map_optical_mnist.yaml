@@ -7,7 +7,7 @@ data:
 model:
   arch: pure_optical
   latent_channels: 1
-  latent_hw: [10, 10]
+  latent_hw: [200, 200]
   # The following conv settings are ignored when arch=pure_optical (kept for compatibility).
   encoder_channels: [32, 64]
   decoder_channels: [256, 128, 64, 32]
@@ -63,7 +63,7 @@ optics:
     trainable: true
     init: uniform
   z_to_scatter_mm: 20.0
-  z_to_sensor_mm: 5.0
+  z_to_sensor_mm: 20.0
   posterior_sigma: 0.10
   decoder:
     field_init_mode: sqrt_positive
@@ -78,13 +78,13 @@ optics:
   bandlimit: true
   upsample_factor: 1
   scatter:
-    type:  correlated_phase #iid_phase #correlated_phase
+    type:   iid_phase #correlated_phase #correlated_phase #
     static: true
     phase_sigma: 1.0
     corr_len_px: 20.0
   sensor:
     # No ROI crop / no extra interpolation: intensity -> pooling -> latent.
-    pool_type: avg # none #
+    pool_type:  none # avg #
     # If you want no pooling, set pool_type: none and make latent_hw == resize_hw.
     # 200x200 field -> 10x10 latent in one step.
     pool_kernel: 20
