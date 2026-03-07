@@ -301,23 +301,21 @@ python optics/test_scattering_memory.py \
 ```
 
 
-python evaluate_compare_latents.py \
-  --config ./configs/analysis_compare_mnist.yaml \
-  --data_root ./data \
-  --outdir ./outputs/task4_mnist/compare
+```bash
+python evaluate_compare_latents.py --config ./configs/analysis_compare_mnist.yaml --data_root ./data --outdir ./outputs/task4_mnist/compare
 
-python visualize_latent_fields.py \
-  --config ./configs/analysis_compare_mnist.yaml \
-  --data_root ./data \
-  --outdir ./outputs/task4_mnist/visualize \
-  --mode both
+python visualize_latent_fields.py --config ./configs/analysis_compare_mnist.yaml --data_root ./data --outdir ./outputs/task4_mnist/visualize --mode both
 
-python analyze_latent_structure.py \
-  --config ./configs/analysis_compare_mnist.yaml \
-  --data_root ./data \
-  --outdir ./outputs/task4_mnist/structure
+python analyze_latent_structure.py --config ./configs/analysis_compare_mnist.yaml --data_root ./data --outdir ./outputs/task4_mnist/structure
 
-python analyze_latent_noise.py \
-  --config ./configs/analysis_compare_mnist.yaml \
-  --data_root ./data \
-  --outdir ./outputs/task4_mnist/noise
+python analyze_latent_noise.py --config ./configs/analysis_compare_mnist.yaml --data_root ./data --outdir ./outputs/task4_mnist/noise
+
+
+python evaluate_compare_latents.py --config ./configs/analysis_compare_fashionmnist.yaml --data_root ./data --outdir ./outputs/task4_fashionmnist/compare
+
+python visualize_latent_fields.py --config ./configs/analysis_compare_fashionmnist.yaml --data_root ./data --outdir ./outputs/task4_fashionmnist/visualize --mode both
+
+python analyze_latent_structure.py --config ./configs/analysis_compare_fashionmnist.yaml --data_root ./data --outdir ./outputs/task4_fashionmnist/structure
+
+python analyze_latent_noise.py --config ./configs/analysis_compare_fashionmnist.yaml --data_root ./data --outdir ./outputs/task4_fashionmnist/noise
+```
