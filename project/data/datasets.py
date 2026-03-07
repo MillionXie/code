@@ -28,6 +28,19 @@ DATASET_INFO: Dict[str, Dict[str, object]] = {
 }
 
 
+def normalize_dataset_name(dataset: str) -> str:
+    ds = str(dataset).strip().lower()
+    alias_map = {
+        "fashion": "fashionmnist",
+        "fmnist": "fashionmnist",
+        "fashion-mnist": "fashionmnist",
+        "fashion_mnist": "fashionmnist",
+        "cifar": "cifar10",
+        "cifar-10": "cifar10",
+    }
+    return alias_map.get(ds, ds)
+
+
 def _parse_image_size(image_size: Optional[Sequence[int]], default_hw: Tuple[int, int]) -> Tuple[int, int]:
     if image_size is None:
         return default_hw
@@ -37,6 +50,7 @@ def _parse_image_size(image_size: Optional[Sequence[int]], default_hw: Tuple[int
 
 
 def get_dataset_info(dataset: str, image_size: Optional[Sequence[int]] = None) -> Dict[str, object]:
+    dataset = normalize_dataset_name(dataset)
     if dataset not in DATASET_INFO:
         raise ValueError(f"Unsupported dataset: {dataset}")
     info = DATASET_INFO[dataset].copy()
@@ -45,6 +59,7 @@ def get_dataset_info(dataset: str, image_size: Optional[Sequence[int]] = None) -
 
 
 def _build_transform(dataset: str, out_range: str, image_size: Optional[Sequence[int]] = None) -> transforms.Compose:
+    dataset = normalize_dataset_name(dataset)
     in_channels = DATASET_INFO[dataset]["in_channels"]
     target_hw = _parse_image_size(image_size=image_size, default_hw=tuple(DATASET_INFO[dataset]["image_size"]))
     tfms: list = []
@@ -72,7 +87,7 @@ def get_dataloaders(
     val_split: float = 0.1,
     image_size: Optional[Sequence[int]] = None,
 ) -> tuple[DataLoader, DataLoader, DataLoader, Dict[str, object]]:
-    dataset = dataset.lower()
+    dataset = normalize_dataset_name(dataset)
     info = get_dataset_info(dataset, image_size=image_size)
     transform = _build_transform(dataset=dataset, out_range=out_range, image_size=image_size)
 

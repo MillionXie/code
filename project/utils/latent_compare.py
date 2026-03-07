@@ -7,7 +7,7 @@ import numpy as np
 import torch
 import yaml
 
-from data.datasets import get_dataloaders, get_dataset_info
+from data.datasets import get_dataloaders, get_dataset_info, normalize_dataset_name
 from models import ConvVAE, IdentityAdapter
 from utils.config import load_config
 from utils.map_optical import build_map_core_from_cfg, build_optical_adapter_from_cfg
@@ -118,7 +118,7 @@ def load_model_bundle_from_checkpoint(
             raise ValueError("Unsupported mode: {}".format(resolved_mode))
 
         data_cfg = cfg.get("data", {})
-        dataset = str(cfg.get("dataset", "mnist")).lower()
+        dataset = normalize_dataset_name(str(cfg.get("dataset", "mnist")))
         out_range = str(data_cfg.get("out_range", "zero_one"))
         image_size = tuple(int(v) for v in data_cfg.get("image_size", [64, 64]))
 
@@ -161,7 +161,7 @@ def load_model_bundle_from_checkpoint(
 
     # Path B: vector ConvVAE checkpoints (train_vae.py).
     if isinstance(args, dict) and "model_state_dict" in ckpt:
-        dataset = str(args.get("dataset", "mnist")).lower()
+        dataset = normalize_dataset_name(str(args.get("dataset", "mnist")))
         info = get_dataset_info(dataset)
         out_range = str(args.get("out_range", "zero_one"))
         image_size = tuple(int(v) for v in info["image_size"])
@@ -206,6 +206,7 @@ def build_test_loader(
     num_workers: int,
     seed: int,
 ):
+    dataset = normalize_dataset_name(dataset)
     _, _, test_loader, dataset_info = get_dataloaders(
         dataset=dataset,
         data_root=data_root,

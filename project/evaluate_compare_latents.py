@@ -7,6 +7,7 @@ from typing import Any, Dict, List
 import numpy as np
 import torch
 from tqdm import tqdm
+from data.datasets import normalize_dataset_name
 
 from utils.io import save_json, write_summary_csv
 from utils.latent_compare import (
@@ -38,6 +39,8 @@ def parse_args() -> argparse.Namespace:
 def _resolve_runtime(cfg: Dict[str, Any], args: argparse.Namespace) -> Dict[str, Any]:
     analysis_cfg = cfg.get("analysis", {})
     dataset = args.dataset or cfg.get("dataset", analysis_cfg.get("dataset", None))
+    if dataset is not None:
+        dataset = normalize_dataset_name(dataset)
     batch_size = int(args.batch_size if args.batch_size is not None else analysis_cfg.get("batch_size", 256))
     num_workers = int(args.num_workers if args.num_workers is not None else analysis_cfg.get("num_workers", 4))
     seed = int(args.seed if args.seed is not None else analysis_cfg.get("seed", 42))
