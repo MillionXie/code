@@ -18,6 +18,7 @@ from utils.eval_tools import (
 from utils.io import flatten_dict, now_timestamp, save_json, write_summary_csv
 from utils.logger import create_logger
 from utils.metrics import kl_divergence, mse_loss, psnr_from_mse, ssim_score
+from utils.fid import compute_fid_from_images
 from utils.seed import set_seed
 from utils.viz import save_image_grid
 
@@ -37,6 +38,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--interp_labels", type=str, default="0,1,2,3")
     parser.add_argument("--n_interp_panels", type=int, default=8)
     parser.add_argument("--class_bank_per_label", type=int, default=32)
+    parser.add_argument("--compute_interp_fid", action="store_true")
+    parser.add_argument("--fid_max_images", type=int, default=512)
+    parser.add_argument("--fid_batch_size", type=int, default=64)
     return parser.parse_args()
 
 
@@ -153,6 +157,8 @@ def main() -> None:
     recon_collected = 0
 
     class_bank: dict[int, list[torch.Tensor]] = {}
+    fid_real_bank = []
+    fid_real_count = 0
 
     with torch.no_grad():
         for x, y in tqdm(test_loader, desc="Evaluating", leave=False):
@@ -183,6 +189,11 @@ def main() -> None:
                 recon_outputs.append(recon[:take].detach().cpu())
                 recon_labels.append(y[:take].detach().cpu())
                 recon_collected += take
+
+            if args.compute_interp_fid and fid_real_count < int(args.fid_max_images):
+                take = min(int(args.fid_max_images) - fid_real_count, x.size(0))
+                fid_real_bank.append(x[:take].detach().cpu())
+                fid_real_count += take
 
             y_cpu = y.cpu()
             x_cpu = x.detach().cpu()
@@ -235,6 +246,8 @@ def main() -> None:
         prototypes[label] = _select_class_prototype(model, class_bank[label], device=device)
 
     panel_rows = []
+    fid_fake_bank = []
+    fid_fake_count = 0
     for panel_idx, labels in enumerate(label_panels):
         corners = [prototypes[int(lb)] for lb in labels]
         tl, tr, bl, br = corners[0], corners[1], corners[2], corners[3]
@@ -273,6 +286,10 @@ def main() -> None:
                 "smoothness": smoothness,
             }
         )
+        if args.compute_interp_fid and fid_fake_count < int(args.fid_max_images):
+            take = min(int(args.fid_max_images) - fid_fake_count, imgs.size(0))
+            fid_fake_bank.append(imgs[:take].clone())
+            fid_fake_count += take
 
     if len(panel_rows) > 0:
         (interp_dir / "interp_panel_main.png").write_bytes((interp_dir / "interp_panel_000.png").read_bytes())
@@ -283,6 +300,33 @@ def main() -> None:
         keys = list(panel_rows[0]["smoothness"].keys())
         for key in keys:
             interp_agg[key] = float(np.mean([row["smoothness"][key] for row in panel_rows]))
+
+    interp_fid = {
+        "enabled": False,
+        "value": None,
+        "status": "disabled",
+        "n_real": int(fid_real_count),
+        "n_fake": int(fid_fake_count),
+    }
+    if args.compute_interp_fid:
+        if len(fid_real_bank) == 0 or len(fid_fake_bank) == 0:
+            interp_fid = {
+                "enabled": False,
+                "value": None,
+                "status": "missing_real_or_fake_images",
+                "n_real": int(fid_real_count),
+                "n_fake": int(fid_fake_count),
+            }
+        else:
+            fid_real = torch.cat(fid_real_bank, dim=0)
+            fid_fake = torch.cat(fid_fake_bank, dim=0)
+            interp_fid = compute_fid_from_images(
+                real_images=fid_real,
+                fake_images=fid_fake,
+                out_range=out_range,
+                device=device,
+                batch_size=int(args.fid_batch_size),
+            )
 
     per_sample_rows = []
     for idx in range(int(len(label_np))):
@@ -296,18 +340,28 @@ def main() -> None:
                 "kl": float(kl_np[idx]),
             }
         )
+    write_summary_csv(outdir / "reconstruction_per_sample_metrics.csv", per_sample_rows)
     write_summary_csv(outdir / "per_sample_metrics.csv", per_sample_rows)
 
-    metrics = {
-        "dataset": dataset,
-        "checkpoint": str(ckpt_path),
+    recon_metrics = {
         "mse": mse_sum / max(count, 1),
         "psnr": psnr_sum / max(count, 1),
         "ssim": ssim_sum / max(count, 1),
         "kl_mean": kl_sum / max(count, 1),
-        "samples": count,
+        "samples": int(count),
+    }
+
+    metrics = {
+        "dataset": dataset,
+        "checkpoint": str(ckpt_path),
+        "mse": recon_metrics["mse"],
+        "psnr": recon_metrics["psnr"],
+        "ssim": recon_metrics["ssim"],
+        "kl_mean": recon_metrics["kl_mean"],
+        "samples": int(count),
         "device": str(device),
         "reconstruction": {
+            "metrics": recon_metrics,
             "requested": int(args.num_recon_images),
             "saved_pairs": int(recon_saved),
             "pairs_per_row": int(args.recon_pairs_per_row),
@@ -315,15 +369,19 @@ def main() -> None:
             "artifact_preview": str(recon_dir / "reconstruction_pairs_preview.png"),
         },
         "interpolation": {
+            "metrics": {
+                "aggregate_smoothness": interp_agg,
+                "fid": interp_fid,
+            },
             "grid_size": int(args.interp_grid_size),
             "requested_panels": int(args.n_interp_panels),
             "saved_panels": len(panel_rows),
             "panel_label_mode": "fixed_base_labels",
             "base_corner_labels": [int(x) for x in base_labels],
-            "aggregate_smoothness": interp_agg,
             "panels": panel_rows,
         },
         "artifacts": {
+            "reconstruction_per_sample_metrics_csv": str(outdir / "reconstruction_per_sample_metrics.csv"),
             "per_sample_metrics_csv": str(outdir / "per_sample_metrics.csv"),
             "reconstruction_dir": str(recon_dir),
             "interpolation_dir": str(interp_dir),
@@ -336,11 +394,12 @@ def main() -> None:
     write_summary_csv(outdir / "summary.csv", [flatten_dict(metrics)])
 
     logger.info(
-        "Evaluation done | mse=%.6f psnr=%.3f ssim=%.4f kl=%.4f recon_pairs=%d interp_panels=%d",
-        metrics["mse"],
-        metrics["psnr"],
-        metrics["ssim"],
-        metrics["kl_mean"],
+        "Evaluation done | recon_mse=%.6f recon_psnr=%.3f recon_ssim=%.4f recon_kl=%.4f interp_fid=%s recon_pairs=%d interp_panels=%d",
+        recon_metrics["mse"],
+        recon_metrics["psnr"],
+        recon_metrics["ssim"],
+        recon_metrics["kl_mean"],
+        "{:.4f}".format(float(interp_fid["value"])) if interp_fid.get("value", None) is not None else "N/A",
         metrics["reconstruction"]["saved_pairs"],
         metrics["interpolation"]["saved_panels"],
     )

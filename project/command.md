@@ -229,7 +229,51 @@ python analyze_map.py --config ./configs/map_optical_mnist.yaml --checkpoint ./o
 - 推荐优先用 `pool_kernel == pool_stride` 直接把 `resize_hw` 降到 `latent_hw`，不做额外数字后处理缩放。
 - 若要关闭池化，设 `pool_type=none`，并把 `latent_hw` 设成与解 padding 后光场一致的尺寸。
 
-## 8) 散射介质记忆效应测试（新）
+## 8) 评估增强（重建/插值分离 + 插值FID）
+
+```bash
+# map 评估（输出中 reconstruction.metrics 与 interpolation.metrics 分开保存）
+# 默认不算 FID；加上 --compute_interp_fid 可启用插值 FID
+python eval_map.py \
+  --checkpoint ./outputs/map_opt_mnist/checkpoints/best.pt \
+  --mode optical \
+  --data_root ./data \
+  --outdir ./outputs/map_opt_mnist/eval_plus \
+  --compute_interp_fid \
+  --fid_max_images 512 \
+  --fid_batch_size 64
+```
+
+```bash
+# vector VAE 评估同样支持插值 FID
+python eval_vae.py \
+  --checkpoint ./outputs/vae_mnist_tiny/checkpoints/best.pt \
+  --data_root ./data \
+  --outdir ./outputs/vae_mnist_tiny/eval_plus \
+  --compute_interp_fid
+```
+
+```bash
+# 一次性扫描 outputs/ 下所有对照组并批量评估（自动识别 ordinary/scattering）
+# 默认开启插值 FID；若只想快速跑可加 --no_interp_fid
+python batch_evaluate_outputs.py \
+  --outputs_root ./outputs \
+  --data_root ./data \
+  --outdir ./outputs/batch_eval_all \
+  --batch_size 256 \
+  --num_workers 4 \
+  --seed 42
+```
+
+```bash
+# 仅重算某次批量评估（覆盖每个 run 的 eval 结果）
+python batch_evaluate_outputs.py \
+  --outputs_root ./outputs \
+  --data_root ./data \
+  --outdir ./outputs/batch_eval_all_rerun \
+  --re_eval
+```
+## 9) 散射介质记忆效应测试（新）
 
 ```bash
 # 传播距离 a -> 散射介质 -> 传播距离 b，比较三种散射建模与相关长度/NA 对记忆效应的影响
