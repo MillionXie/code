@@ -150,9 +150,16 @@ def main() -> None:
             float(dec_cfg.get("z_to_sensor_mm", 20.0)),
         )
     logger.info(
-        "Scatter+Sensor | scatter_type=%s scatter.static=%s latent_hw=%s pool_type=%s pool_kernel=%s pool_stride=%s pool_reduce=%s",
+        "Scatter+Sensor | scatter_type=%s scatter.static=%s corr_len_px=%s phase_sigma=%s na=%s max_k=%s "
+        "z_to_scatter_mm=%s z_to_sensor_mm=%s latent_hw=%s pool_type=%s pool_kernel=%s pool_stride=%s pool_reduce=%s",
         str(scatter_cfg.get("type", "iid_phase")),
         bool(getattr(adapter.scatterer, "static", scatter_cfg.get("static", True))),
+        scatter_cfg.get("corr_len_px", None),
+        scatter_cfg.get("phase_sigma", None),
+        scatter_cfg.get("na", None),
+        scatter_cfg.get("max_k", None),
+        float(optics_cfg.get("z_to_scatter_mm", optics_cfg.get("z2_mm", 20.0))),
+        float(optics_cfg.get("z_to_sensor_mm", 1.0)),
         tuple(model.latent_hw),
         str(sensor_cfg.get("pool_type", "avg")),
         sensor_cfg.get("pool_kernel", 2),
