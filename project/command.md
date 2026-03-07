@@ -263,6 +263,10 @@ python batch_evaluate_outputs.py \
   --batch_size 256 \
   --num_workers 4 \
   --seed 42
+
+# 说明：
+# 1) *_raw.csv/json 是未四舍五入原始值（建议用于排查“指标过于接近”）
+# 2) 默认会计算 interpolation FID；若环境缺少对应依赖可临时用 --no_interp_fid
 ```
 
 ```bash

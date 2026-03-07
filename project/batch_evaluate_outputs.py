@@ -5,6 +5,7 @@ import json
 import re
 import subprocess
 import sys
+import hashlib
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -183,6 +184,21 @@ def _load_eval_results(eval_outdir: Path) -> Dict[str, Any]:
         return json.load(f)
 
 
+def _has_valid_interp_fid(results: Dict[str, Any]) -> bool:
+    inter = results.get("interpolation", {})
+    metrics = inter.get("metrics", {})
+    fid = metrics.get("fid", {})
+    if not isinstance(fid, dict):
+        return False
+    status = str(fid.get("status", ""))
+    val = fid.get("value", None)
+    if val is None:
+        return False
+    if status.startswith("inception_unavailable"):
+        return False
+    return True
+
+
 def _extract_metric(results: Dict[str, Any], key: str, default: Optional[float] = None) -> Optional[float]:
     # Reconstruction metrics
     rec = results.get("reconstruction", {})
@@ -215,6 +231,24 @@ def _extract_interp_neighbor_metric(results: Dict[str, Any]) -> Optional[float]:
         if k in smooth:
             return smooth[k]
     return None
+
+
+def _sha1_short(path: Path, max_bytes: int = 2_000_000) -> Optional[str]:
+    if not path.exists():
+        return None
+    h = hashlib.sha1()
+    try:
+        with path.open("rb") as f:
+            remain = int(max_bytes)
+            while remain > 0:
+                chunk = f.read(min(1 << 20, remain))
+                if not chunk:
+                    break
+                h.update(chunk)
+                remain -= len(chunk)
+        return h.hexdigest()[:12]
+    except Exception:
+        return None
 
 
 def _group_stats(values: List[float]) -> Dict[str, Optional[float]]:
@@ -341,7 +375,7 @@ def main() -> None:
     run_dirs = _discover_runs(outputs_root)
     script_root = Path(__file__).resolve().parent
 
-    run_rows: List[Dict[str, Any]] = []
+    run_rows_raw: List[Dict[str, Any]] = []
     skipped_rows: List[Dict[str, Any]] = []
 
     for run_dir in run_dirs:
@@ -359,7 +393,16 @@ def main() -> None:
         eval_outdir = eval_runs_dir / run_key
         results_path = eval_outdir / "results.json"
 
-        if args.re_eval or not results_path.exists():
+        need_eval = bool(args.re_eval) or (not results_path.exists())
+        if (not need_eval) and bool(args.compute_interp_fid):
+            try:
+                old_results = _load_eval_results(eval_outdir)
+                if not _has_valid_interp_fid(old_results):
+                    need_eval = True
+            except Exception:
+                need_eval = True
+
+        if need_eval:
             cmd = _eval_command(script_root=script_root, run_meta=inspect, eval_outdir=eval_outdir, args=args)
             proc = subprocess.run(cmd, capture_output=True, text=True)
             if proc.returncode != 0:
@@ -384,12 +427,17 @@ def main() -> None:
             continue
 
         interp_fid_value, interp_fid_status = _extract_interp_fid(results)
+        recon_preview = Path(str(results.get("reconstruction", {}).get("artifact_preview", "")))
+        if not recon_preview.is_absolute():
+            recon_preview = eval_outdir / "reconstructions" / "reconstruction_pairs_preview.png"
         row = {
             "run_name": run_name,
             "run_key": run_key,
             "run_dir": str(run_dir),
             "eval_dir": str(eval_outdir),
             "checkpoint": str(inspect["checkpoint"]),
+            "checkpoint_sha1_12": _sha1_short(Path(inspect["checkpoint"])),
+            "recon_preview_sha1_12": _sha1_short(recon_preview),
             "dataset": inspect.get("dataset"),
             "run_type": inspect.get("run_type"),
             "mode": inspect.get("mode"),
@@ -408,22 +456,32 @@ def main() -> None:
             "interp_fid": interp_fid_value,
             "interp_fid_status": interp_fid_status,
         }
-        run_rows.append(row)
+        run_rows_raw.append(row)
 
-    run_rows = _format_row_numbers_3dp(run_rows)
-    skipped_rows = _format_row_numbers_3dp(skipped_rows)
-    ci_rows = _format_row_numbers_3dp(_aggregate_ci(run_rows))
-    contrast_rows = _format_row_numbers_3dp(_build_latent_vs_scatter(run_rows))
+    # Aggregate on raw values first to avoid precision-loss in CI.
+    ci_rows_raw = _aggregate_ci(run_rows_raw)
+    contrast_rows_raw = _build_latent_vs_scatter(run_rows_raw)
 
+    run_rows = _format_row_numbers_3dp(run_rows_raw)
+    ci_rows = _format_row_numbers_3dp(ci_rows_raw)
+    contrast_rows = _format_row_numbers_3dp(contrast_rows_raw)
+    skipped_rows_round = _format_row_numbers_3dp(skipped_rows)
+
+    write_summary_csv(outdir / "all_runs_metrics_raw.csv", run_rows_raw)
+    write_summary_csv(outdir / "grouped_ci_summary_raw.csv", ci_rows_raw)
+    write_summary_csv(outdir / "latent_vs_scatter_comparison_raw.csv", contrast_rows_raw)
     write_summary_csv(outdir / "all_runs_metrics.csv", run_rows)
     write_summary_csv(outdir / "grouped_ci_summary.csv", ci_rows)
     write_summary_csv(outdir / "latent_vs_scatter_comparison.csv", contrast_rows)
-    write_summary_csv(outdir / "skipped_runs.csv", skipped_rows)
+    write_summary_csv(outdir / "skipped_runs.csv", skipped_rows_round)
 
+    save_json({"rows": run_rows_raw}, outdir / "all_runs_metrics_raw.json")
+    save_json({"rows": ci_rows_raw}, outdir / "grouped_ci_summary_raw.json")
+    save_json({"rows": contrast_rows_raw}, outdir / "latent_vs_scatter_comparison_raw.json")
     save_json({"rows": run_rows}, outdir / "all_runs_metrics.json")
     save_json({"rows": ci_rows}, outdir / "grouped_ci_summary.json")
     save_json({"rows": contrast_rows}, outdir / "latent_vs_scatter_comparison.json")
-    save_json({"rows": skipped_rows}, outdir / "skipped_runs.json")
+    save_json({"rows": skipped_rows_round}, outdir / "skipped_runs.json")
 
     used_cfg = {
         "outputs_root": str(outputs_root),
@@ -436,7 +494,7 @@ def main() -> None:
         "fid_batch_size": int(args.fid_batch_size),
         "re_eval": bool(args.re_eval),
         "num_discovered_runs": int(len(run_dirs)),
-        "num_evaluated_runs": int(len(run_rows)),
+        "num_evaluated_runs": int(len(run_rows_raw)),
         "num_skipped_runs": int(len(skipped_rows)),
     }
     with (outdir / "config_used.yaml").open("w", encoding="utf-8") as f:
@@ -444,7 +502,7 @@ def main() -> None:
 
     print("Batch evaluation done.")
     print("outdir: {}".format(outdir))
-    print("evaluated_runs: {} | skipped_runs: {}".format(len(run_rows), len(skipped_rows)))
+    print("evaluated_runs: {} | skipped_runs: {}".format(len(run_rows_raw), len(skipped_rows)))
 
 
 if __name__ == "__main__":

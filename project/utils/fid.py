@@ -42,7 +42,9 @@ def _build_inception(device: torch.device):
     if not _TV_AVAILABLE:
         raise RuntimeError("torchvision inception is unavailable")
     weights = Inception_V3_Weights.DEFAULT
-    model = inception_v3(weights=weights, transform_input=False, aux_logits=False)
+    # Keep torchvision default aux_logits behavior to satisfy weight metadata checks
+    # across different torchvision versions.
+    model = inception_v3(weights=weights, transform_input=False)
     model.fc = torch.nn.Identity()
     model.eval().to(device)
     return model
