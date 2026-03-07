@@ -17,6 +17,7 @@ from utils.latent_compare import (
     extract_decoder_latent,
     load_analysis_config,
     load_model_bundle_from_checkpoint,
+    resolve_checkpoint_groups,
     save_config_used,
 )
 from utils.seed import set_seed
@@ -115,11 +116,11 @@ def main() -> None:
     runtime = _resolve_runtime(cfg, args)
     set_seed(int(runtime["seed"]))
 
-    ckpt_cfg = cfg.get("checkpoints", {})
-    ckpt_elec = ckpt_cfg.get("electronic", None)
-    ckpt_opt = ckpt_cfg.get("optical", None)
-    if ckpt_elec is None or ckpt_opt is None:
-        raise ValueError("config.checkpoints.electronic and config.checkpoints.optical are required")
+    ckpt_grp = resolve_checkpoint_groups(cfg)
+    ckpt_elec = ckpt_grp.get("electronic", None)
+    optical_entries = ckpt_grp.get("opticals", [])
+    if ckpt_elec is None or len(optical_entries) == 0:
+        raise ValueError("Need checkpoints.electronic and at least one optical checkpoint (optical/opticals).")
 
     outdir = Path(runtime["outdir"])
     fig_dir, metrics_dir = ensure_analysis_dirs(outdir)
@@ -127,43 +128,68 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     bundle_e = load_model_bundle_from_checkpoint(ckpt_elec, device=device, mode="electronic")
-    bundle_o = load_model_bundle_from_checkpoint(ckpt_opt, device=device, mode="optical")
+    bundles_to_eval: List[Dict[str, Any]] = []
+    bundles_to_eval.append({"tag": "electronic", "name": "electronic", "bundle": bundle_e})
+    for item in optical_entries:
+        b = load_model_bundle_from_checkpoint(item["path"], device=device, mode="optical")
+        bundles_to_eval.append({"tag": "optical", "name": item["name"], "bundle": b})
 
+    loader_cache: Dict[str, Any] = {}
+    rows = []
+    per_sample_dict: Dict[str, List[Dict[str, Any]]] = {}
     dataset = runtime["dataset"] or bundle_e["dataset"]
     if dataset is None:
         raise ValueError("Dataset is missing in args/config/checkpoint.")
 
-    out_range = bundle_e["out_range"]
-    image_size = bundle_e["image_size"]
-    if bundle_o["out_range"] != out_range:
-        raise ValueError("Electronic/optical out_range mismatch: {} vs {}".format(out_range, bundle_o["out_range"]))
-    if tuple(bundle_o["image_size"]) != tuple(image_size):
-        raise ValueError("Electronic/optical image_size mismatch: {} vs {}".format(image_size, bundle_o["image_size"]))
+    for entry in bundles_to_eval:
+        bundle = entry["bundle"]
+        bundle_dataset = runtime["dataset"] or bundle["dataset"]
+        if bundle_dataset != dataset:
+            raise ValueError(
+                "Dataset mismatch among checkpoints: expected {}, got {} for {}".format(
+                    dataset, bundle_dataset, entry["name"]
+                )
+            )
+        cache_key = "{}|{}|{}x{}".format(
+            dataset,
+            bundle.get("out_range"),
+            int(bundle["image_size"][0]),
+            int(bundle["image_size"][1]),
+        )
+        if cache_key not in loader_cache:
+            test_loader, dataset_info = build_test_loader(
+                dataset=dataset,
+                data_root=args.data_root,
+                out_range=bundle["out_range"],
+                image_size=bundle["image_size"],
+                batch_size=int(runtime["batch_size"]),
+                num_workers=int(runtime["num_workers"]),
+                seed=int(runtime["seed"]),
+            )
+            loader_cache[cache_key] = (test_loader, dataset_info)
+        else:
+            test_loader, dataset_info = loader_cache[cache_key]
 
-    test_loader, dataset_info = build_test_loader(
-        dataset=dataset,
-        data_root=args.data_root,
-        out_range=out_range,
-        image_size=image_size,
-        batch_size=int(runtime["batch_size"]),
-        num_workers=int(runtime["num_workers"]),
-        seed=int(runtime["seed"]),
-    )
-    data_range = float(dataset_info.get("data_range", 1.0))
-
-    res_e = _evaluate_bundle(bundle_e, test_loader=test_loader, data_range=data_range, device=device)
-    res_o = _evaluate_bundle(bundle_o, test_loader=test_loader, data_range=data_range, device=device)
-
-    rows = []
-    for bundle, res in [(bundle_e, res_e), (bundle_o, res_o)]:
+        res = _evaluate_bundle(
+            bundle,
+            test_loader=test_loader,
+            data_range=float(dataset_info.get("data_range", 1.0)),
+            device=device,
+        )
         latent_hw = bundle.get("latent_hw", None)
         rows.append(
             {
                 "dataset": dataset,
+                "tag": entry["tag"],
+                "name": entry["name"],
                 "mode": bundle["mode"],
+                "family": bundle.get("family", "map"),
                 "latent_channels": bundle.get("latent_channels", None),
                 "latent_h": int(latent_hw[0]) if latent_hw is not None else None,
                 "latent_w": int(latent_hw[1]) if latent_hw is not None else None,
+                "out_range": bundle.get("out_range"),
+                "image_h": int(bundle["image_size"][0]) if bundle.get("image_size", None) is not None else None,
+                "image_w": int(bundle["image_size"][1]) if bundle.get("image_size", None) is not None else None,
                 "checkpoint": bundle["checkpoint"],
                 "test_mse": float(res["test_mse"]),
                 "test_psnr": float(res["test_psnr"]),
@@ -172,11 +198,13 @@ def main() -> None:
                 "fid": None,
             }
         )
+        per_sample_dict[entry["name"]] = res["per_sample_rows"]
 
     write_summary_csv(metrics_dir / "summary_metrics.csv", rows)
     save_json({"rows": rows}, metrics_dir / "summary_metrics.json")
-    write_summary_csv(metrics_dir / "per_sample_metrics_electronic.csv", res_e["per_sample_rows"])
-    write_summary_csv(metrics_dir / "per_sample_metrics_optical.csv", res_o["per_sample_rows"])
+    for name, ps_rows in per_sample_dict.items():
+        safe_name = str(name).replace("/", "_").replace("\\", "_").replace(" ", "_")
+        write_summary_csv(metrics_dir / "per_sample_metrics_{}.csv".format(safe_name), ps_rows)
 
     used_cfg = {
         "input_config": cfg,
@@ -185,8 +213,7 @@ def main() -> None:
             "data_root": args.data_root,
             "device": str(device),
             "resolved_dataset": dataset,
-            "resolved_out_range": out_range,
-            "resolved_image_size": list(image_size),
+            "num_models": len(bundles_to_eval),
         },
     }
     save_config_used(used_cfg, outdir / "config_used.yaml")

@@ -20,4 +20,6 @@ analysis:
 
 checkpoints:
   electronic: ./outputs/map_elec_cifar10/checkpoints/best.pt
-  optical: ./outputs/map_opt_cifar10/checkpoints/best.pt
+  opticals:
+    - name: opt_default
+      path: ./outputs/map_opt_cifar10/checkpoints/best.pt

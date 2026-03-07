@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 from torchvision.utils import make_grid, save_image
+import math
 
 from utils.io import save_json, write_summary_csv
 from utils.latent_compare import (
@@ -20,6 +21,7 @@ from utils.latent_compare import (
     fetch_dataset_indices,
     load_analysis_config,
     load_model_bundle_from_checkpoint,
+    resolve_checkpoint_groups,
     save_config_used,
     to_display_range,
 )
@@ -130,6 +132,7 @@ def _plot_noise_curves(rows: List[Dict[str, Any]], out_path: Path, save_pdf: boo
 
 def _evaluate_noise_for_mode(
     bundle: Dict[str, Any],
+    mode_label: str,
     test_loader,
     data_range: float,
     sigmas: List[float],
@@ -163,7 +166,7 @@ def _evaluate_noise_for_mode(
 
         rows.append(
             {
-                "mode": bundle["mode"],
+                "mode": mode_label,
                 "sigma": float(sigma),
                 "samples": int(count),
                 "mse": float(mse_sum / max(count, 1)),
@@ -194,6 +197,7 @@ def _find_interp_pair(test_loader, indices: List[int]) -> Tuple[torch.Tensor, to
 
 def _interp_and_save(
     bundle: Dict[str, Any],
+    model_name: str,
     x1: torch.Tensor,
     x2: torch.Tensor,
     out_prefix: Path,
@@ -202,6 +206,19 @@ def _interp_and_save(
     sigma_interp: float,
     save_pdf: bool,
 ) -> Dict[str, Any]:
+    def _latent_to_vis_map(z: torch.Tensor) -> torch.Tensor:
+        # z: [B,C,H,W] (map) or [B,D] (vector)
+        if z.dim() == 4:
+            return z.mean(dim=1, keepdim=True)
+        if z.dim() == 2:
+            b, d = z.shape
+            side = int(math.ceil(math.sqrt(float(d))))
+            pad = side * side - d
+            if pad > 0:
+                z = torch.cat([z, torch.zeros(b, pad, device=z.device, dtype=z.dtype)], dim=1)
+            return z.view(b, 1, side, side)
+        raise ValueError("Unsupported latent shape for visualization: {}".format(tuple(z.shape)))
+
     device = next(bundle["model"].parameters()).device
     with torch.no_grad():
         xb = torch.cat([x1, x2], dim=0).to(device)
@@ -215,7 +232,7 @@ def _interp_and_save(
             if sigma_interp > 0:
                 zt = zt + sigma_interp * torch.randn_like(zt)
             zs.append(zt)
-            latent_maps.append(zt.mean(dim=1, keepdim=True))
+            latent_maps.append(_latent_to_vis_map(zt))
         z_interp = torch.cat(zs, dim=0)
         recon = decode_from_latent(bundle, z_interp)
         latent_grid = torch.cat(latent_maps, dim=0)
@@ -229,6 +246,7 @@ def _interp_and_save(
         save_pdf=save_pdf,
     )
     return {
+        "model_name": model_name,
         "steps": int(steps),
         "sigma_interp": float(sigma_interp),
         "recon_shape": list(recon.shape),
@@ -242,11 +260,11 @@ def main() -> None:
     runtime = _resolve_runtime(cfg, args)
     set_seed(int(runtime["seed"]))
 
-    ckpt_cfg = cfg.get("checkpoints", {})
-    ckpt_e = ckpt_cfg.get("electronic", None)
-    ckpt_o = ckpt_cfg.get("optical", None)
-    if ckpt_e is None or ckpt_o is None:
-        raise ValueError("config.checkpoints.electronic and config.checkpoints.optical are required")
+    ckpt_grp = resolve_checkpoint_groups(cfg)
+    ckpt_e = ckpt_grp.get("electronic", None)
+    optical_entries = ckpt_grp.get("opticals", [])
+    if ckpt_e is None or len(optical_entries) == 0:
+        raise ValueError("Need checkpoints.electronic and at least one optical checkpoint (optical/opticals).")
 
     outdir = Path(runtime["outdir"])
     fig_dir, metrics_dir = ensure_analysis_dirs(outdir)
@@ -254,44 +272,58 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     bundle_e = load_model_bundle_from_checkpoint(ckpt_e, device=device, mode="electronic")
-    bundle_o = load_model_bundle_from_checkpoint(ckpt_o, device=device, mode="optical")
+    optical_bundles = []
+    for item in optical_entries:
+        optical_bundles.append({"name": item["name"], "bundle": load_model_bundle_from_checkpoint(item["path"], device=device, mode="optical")})
 
     dataset = runtime["dataset"] or bundle_e["dataset"]
     if dataset is None:
         raise ValueError("Dataset is missing in args/config/checkpoint.")
-    if bundle_o["out_range"] != bundle_e["out_range"] or tuple(bundle_o["image_size"]) != tuple(bundle_e["image_size"]):
-        raise ValueError("Electronic/optical image setting mismatch; cannot compare directly.")
 
-    test_loader, dataset_info = build_test_loader(
-        dataset=dataset,
-        data_root=args.data_root,
-        out_range=bundle_e["out_range"],
-        image_size=bundle_e["image_size"],
-        batch_size=int(runtime["batch_size"]),
-        num_workers=int(runtime["num_workers"]),
-        seed=int(runtime["seed"]),
-    )
+    entries: List[Dict[str, Any]] = [{"name": "electronic", "tag": "electronic", "bundle": bundle_e}]
+    for item in optical_bundles:
+        entries.append({"name": item["name"], "tag": "optical", "bundle": item["bundle"]})
 
-    data_range = float(dataset_info.get("data_range", 1.0))
+    loader_cache: Dict[str, Any] = {}
+
     noise_rows = []
-    noise_rows.extend(
-        _evaluate_noise_for_mode(
-            bundle=bundle_e,
-            test_loader=test_loader,
-            data_range=data_range,
-            sigmas=[float(v) for v in runtime["noise_sigmas"]],
-            num_samples=int(runtime["num_samples"]),
+    for entry in entries:
+        bundle = entry["bundle"]
+        if (runtime["dataset"] or bundle["dataset"]) != dataset:
+            raise ValueError(
+                "Dataset mismatch for {}: expected {}, got {}".format(entry["name"], dataset, bundle["dataset"])
+            )
+        cache_key = "{}|{}|{}x{}".format(
+            dataset,
+            bundle.get("out_range"),
+            int(bundle["image_size"][0]),
+            int(bundle["image_size"][1]),
         )
-    )
-    noise_rows.extend(
-        _evaluate_noise_for_mode(
-            bundle=bundle_o,
-            test_loader=test_loader,
-            data_range=data_range,
-            sigmas=[float(v) for v in runtime["noise_sigmas"]],
-            num_samples=int(runtime["num_samples"]),
+        if cache_key not in loader_cache:
+            test_loader, dataset_info = build_test_loader(
+                dataset=dataset,
+                data_root=args.data_root,
+                out_range=bundle["out_range"],
+                image_size=bundle["image_size"],
+                batch_size=int(runtime["batch_size"]),
+                num_workers=int(runtime["num_workers"]),
+                seed=int(runtime["seed"]),
+            )
+            loader_cache[cache_key] = (test_loader, dataset_info)
+        else:
+            test_loader, dataset_info = loader_cache[cache_key]
+
+        mode_label = "{}:{}".format(entry["tag"], entry["name"])
+        noise_rows.extend(
+            _evaluate_noise_for_mode(
+                bundle=bundle,
+                mode_label=mode_label,
+                test_loader=test_loader,
+                data_range=float(dataset_info.get("data_range", 1.0)),
+                sigmas=[float(v) for v in runtime["noise_sigmas"]],
+                num_samples=int(runtime["num_samples"]),
+            )
         )
-    )
 
     write_summary_csv(metrics_dir / "noise_recon_metrics.csv", noise_rows)
     save_json({"rows": noise_rows}, metrics_dir / "noise_recon_metrics.json")
@@ -301,53 +333,66 @@ def main() -> None:
         save_pdf=bool(runtime["save_pdf"]),
     )
 
-    x1, x2, y1, y2, idx1, idx2 = _find_interp_pair(test_loader, runtime["fixed_indices"])
-    interp_e = _interp_and_save(
-        bundle=bundle_e,
-        x1=x1,
-        x2=x2,
-        out_prefix=fig_dir / "interpolation_electronic",
-        out_range=bundle_e["out_range"],
-        steps=int(runtime["interp_steps"]),
-        sigma_interp=float(runtime["interp_noise_sigma"]),
-        save_pdf=bool(runtime["save_pdf"]),
-    )
-    interp_o = _interp_and_save(
-        bundle=bundle_o,
-        x1=x1,
-        x2=x2,
-        out_prefix=fig_dir / "interpolation_optical",
-        out_range=bundle_o["out_range"],
-        steps=int(runtime["interp_steps"]),
-        sigma_interp=float(runtime["interp_noise_sigma"]),
-        save_pdf=bool(runtime["save_pdf"]),
-    )
+    interp_items = []
+    for entry in entries:
+        bundle = entry["bundle"]
+        cache_key = "{}|{}|{}x{}".format(
+            dataset,
+            bundle.get("out_range"),
+            int(bundle["image_size"][0]),
+            int(bundle["image_size"][1]),
+        )
+        test_loader, _ = loader_cache[cache_key]
+        x1, x2, y1, y2, idx1, idx2 = _find_interp_pair(test_loader, runtime["fixed_indices"])
+        safe_name = str(entry["name"]).replace("/", "_").replace("\\", "_").replace(" ", "_")
+        prefix = fig_dir / "interpolation_{}_{}".format(entry["tag"], safe_name)
+        info = _interp_and_save(
+            bundle=bundle,
+            model_name=entry["name"],
+            x1=x1,
+            x2=x2,
+            out_prefix=prefix,
+            out_range=bundle["out_range"],
+            steps=int(runtime["interp_steps"]),
+            sigma_interp=float(runtime["interp_noise_sigma"]),
+            save_pdf=bool(runtime["save_pdf"]),
+        )
+        info.update(
+            {
+                "mode_tag": entry["tag"],
+                "model_name": entry["name"],
+                "index_1": int(idx1),
+                "index_2": int(idx2),
+                "label_1": int(y1),
+                "label_2": int(y2),
+            }
+        )
+        interp_items.append(info)
 
     summary = {
         "dataset": dataset,
         "num_samples_recon_noise": int(runtime["num_samples"]),
         "noise_sigmas": [float(v) for v in runtime["noise_sigmas"]],
-        "interpolation_pair": {
-            "index_1": int(idx1),
-            "index_2": int(idx2),
-            "label_1": int(y1),
-            "label_2": int(y2),
-        },
-        "interpolation_electronic": interp_e,
-        "interpolation_optical": interp_o,
+        "interpolations": interp_items,
     }
     save_json(summary, metrics_dir / "noise_summary.json")
 
-    np.savez_compressed(
-        metrics_dir / "noise_recon_curves.npz",
-        sigmas=np.asarray([float(v) for v in runtime["noise_sigmas"]], dtype=np.float32),
-        electronic_mse=np.asarray([r["mse"] for r in noise_rows if r["mode"] == "electronic"], dtype=np.float32),
-        optical_mse=np.asarray([r["mse"] for r in noise_rows if r["mode"] == "optical"], dtype=np.float32),
-        electronic_psnr=np.asarray([r["psnr"] for r in noise_rows if r["mode"] == "electronic"], dtype=np.float32),
-        optical_psnr=np.asarray([r["psnr"] for r in noise_rows if r["mode"] == "optical"], dtype=np.float32),
-        electronic_ssim=np.asarray([r["ssim"] for r in noise_rows if r["mode"] == "electronic"], dtype=np.float32),
-        optical_ssim=np.asarray([r["ssim"] for r in noise_rows if r["mode"] == "optical"], dtype=np.float32),
-    )
+    npz_data = {
+        "sigmas": np.asarray([float(v) for v in runtime["noise_sigmas"]], dtype=np.float32),
+    }
+    mode_names = sorted(list({str(r["mode"]) for r in noise_rows}))
+    for mode_name in mode_names:
+        safe_mode = mode_name.replace(":", "_").replace("/", "_").replace("\\", "_").replace(" ", "_")
+        npz_data["{}_mse".format(safe_mode)] = np.asarray(
+            [r["mse"] for r in noise_rows if str(r["mode"]) == mode_name], dtype=np.float32
+        )
+        npz_data["{}_psnr".format(safe_mode)] = np.asarray(
+            [r["psnr"] for r in noise_rows if str(r["mode"]) == mode_name], dtype=np.float32
+        )
+        npz_data["{}_ssim".format(safe_mode)] = np.asarray(
+            [r["ssim"] for r in noise_rows if str(r["mode"]) == mode_name], dtype=np.float32
+        )
+    np.savez_compressed(metrics_dir / "noise_recon_curves.npz", **npz_data)
     print("Saved latent noise analysis to: {}".format(outdir))
 
 
