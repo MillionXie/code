@@ -101,15 +101,39 @@ def _inspect_run(run_dir: Path) -> Dict[str, Any]:
     mode = None
     run_type = "unknown"
     latent_family = None
+    cfg_dataset = None
+    cfg_seed = None
+    cfg_latent_hw = None
+    cfg_scatter_type = None
+    cfg_corr_len_px = None
+    cfg_z_to_sensor_mm = None
+    cfg_pool_type = None
+    cfg_pool_kernel = None
+    cfg_pool_stride = None
 
     if isinstance(obj, dict) and "args" in obj:
         # vector VAE baseline
         run_type = "vae_vector"
         latent_family = "ordinary"
-        dataset = dataset or obj.get("args", {}).get("dataset", None)
+        cfg_args = obj.get("args", {})
+        dataset = dataset or cfg_args.get("dataset", None)
+        cfg_dataset = cfg_args.get("dataset", None)
+        cfg_seed = cfg_args.get("seed", None)
     elif isinstance(obj, dict) and "config" in obj and isinstance(obj.get("config"), dict):
         cfg = obj["config"]
         dataset = dataset or cfg.get("dataset", None)
+        cfg_dataset = cfg.get("dataset", None)
+        cfg_seed = cfg.get("train", {}).get("seed", None)
+        cfg_latent_hw = cfg.get("model", {}).get("latent_hw", None)
+        optics_cfg = cfg.get("optics", {})
+        scatter_cfg = optics_cfg.get("scatter", {})
+        sensor_cfg = optics_cfg.get("sensor", {})
+        cfg_scatter_type = scatter_cfg.get("type", None)
+        cfg_corr_len_px = scatter_cfg.get("corr_len_px", None)
+        cfg_z_to_sensor_mm = optics_cfg.get("z_to_sensor_mm", None)
+        cfg_pool_type = sensor_cfg.get("pool_type", None)
+        cfg_pool_kernel = sensor_cfg.get("pool_kernel", None)
+        cfg_pool_stride = sensor_cfg.get("pool_stride", None)
         if cfg.get("optics", None) is not None:
             run_type = "map_optical"
             mode = "optical"
@@ -127,9 +151,18 @@ def _inspect_run(run_dir: Path) -> Dict[str, Any]:
         "run_name": run_name,
         "checkpoint": ckpt,
         "dataset": dataset,
+        "dataset_cfg": cfg_dataset,
+        "seed_cfg": cfg_seed,
         "run_type": run_type,
         "mode": mode,
         "latent_family": latent_family,
+        "latent_hw_cfg": cfg_latent_hw,
+        "scatter_type_cfg": cfg_scatter_type,
+        "corr_len_px_cfg": cfg_corr_len_px,
+        "z_to_sensor_mm_cfg": cfg_z_to_sensor_mm,
+        "pool_type_cfg": cfg_pool_type,
+        "pool_kernel_cfg": cfg_pool_kernel,
+        "pool_stride_cfg": cfg_pool_stride,
         **meta_name,
     }
 
@@ -439,9 +472,18 @@ def main() -> None:
             "checkpoint_sha1_12": _sha1_short(Path(inspect["checkpoint"])),
             "recon_preview_sha1_12": _sha1_short(recon_preview),
             "dataset": inspect.get("dataset"),
+            "dataset_cfg": inspect.get("dataset_cfg"),
+            "seed_cfg": inspect.get("seed_cfg"),
             "run_type": inspect.get("run_type"),
             "mode": inspect.get("mode"),
             "latent_family": inspect.get("latent_family"),
+            "latent_hw_cfg": str(inspect.get("latent_hw_cfg")),
+            "scatter_type_cfg": inspect.get("scatter_type_cfg"),
+            "corr_len_px_cfg": inspect.get("corr_len_px_cfg"),
+            "z_to_sensor_mm_cfg": inspect.get("z_to_sensor_mm_cfg"),
+            "pool_type_cfg": inspect.get("pool_type_cfg"),
+            "pool_kernel_cfg": str(inspect.get("pool_kernel_cfg")),
+            "pool_stride_cfg": str(inspect.get("pool_stride_cfg")),
             "scatter_type": inspect.get("scatter_type_in_name"),
             "corr_len_px": inspect.get("corr_len_px_in_name"),
             "l_mm": inspect.get("l_mm_in_name"),

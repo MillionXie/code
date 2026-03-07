@@ -28,8 +28,10 @@ class ConvVAE(nn.Module):
             channels = [4, 6, 14]
             hidden_dim = 32
         elif model_size == "small":
-            channels = [6, 10, 16]
-            hidden_dim = 48
+            # High-capacity electronic baseline:
+            # latent_dim=100 => ~242k params (MNIST/FashionMNIST), ~243k (CIFAR-10).
+            channels = [16, 24, 32]
+            hidden_dim = 160
         else:
             raise ValueError(f"Unsupported model_size: {model_size}")
 

@@ -218,9 +218,11 @@ def main() -> None:
     logger.info("Trainable parameters: %d", trainable_params)
     if args.model_size == "tiny" and args.latent_dim == 64:
         logger.info("Fair baseline profile active: tiny + latent_dim=64 (~24k params).")
+    elif args.model_size == "small" and args.latent_dim == 100:
+        logger.info("High-capacity profile active: small + latent_dim=100 (~242k params).")
     else:
         logger.warning(
-            "Current setting deviates from fair-profile (tiny+64). params=%d",
+            "Current setting deviates from preset reference profiles (tiny+64 or small+100). params=%d",
             trainable_params,
         )
 
