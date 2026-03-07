@@ -7,8 +7,8 @@ import numpy as np
 import torch
 import yaml
 
-from data.datasets import get_dataloaders
-from models import IdentityAdapter
+from data.datasets import get_dataloaders, get_dataset_info
+from models import ConvVAE, IdentityAdapter
 from utils.config import load_config
 from utils.map_optical import build_map_core_from_cfg, build_optical_adapter_from_cfg
 from utils.metrics import mse_loss, psnr_from_mse, ssim_score
@@ -27,6 +27,59 @@ def save_config_used(cfg: Dict[str, Any], path: Path) -> None:
         yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
 
 
+def _default_ckpt_name(path: str) -> str:
+    p = Path(path)
+    if p.name in ("best.pt", "last.pt") and p.parent.name == "checkpoints":
+        return p.parent.parent.name
+    return p.stem
+
+
+def resolve_checkpoint_groups(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Resolve checkpoint config with backward compatibility.
+
+    Supported forms:
+      checkpoints:
+        electronic: "..."
+        optical: "..."
+    or
+      checkpoints:
+        electronic: "..."
+        opticals:
+          - "./path/to/a.pt"
+          - {name: "corr20", path: "./path/to/b.pt"}
+    """
+    ckpt_cfg = cfg.get("checkpoints", {})
+    electronic = ckpt_cfg.get("electronic", None)
+
+    optical_entries: List[Dict[str, str]] = []
+    raw_opticals = ckpt_cfg.get("opticals", None)
+    if raw_opticals is None:
+        raw_opticals = ckpt_cfg.get("optical_list", None)
+    if raw_opticals is None and ckpt_cfg.get("optical", None) is not None:
+        raw_opticals = [ckpt_cfg.get("optical")]
+
+    if raw_opticals is None:
+        raw_opticals = []
+    if not isinstance(raw_opticals, list):
+        raw_opticals = [raw_opticals]
+
+    for idx, item in enumerate(raw_opticals):
+        if isinstance(item, str):
+            path = item
+            name = _default_ckpt_name(path)
+        elif isinstance(item, dict):
+            path = item.get("path", None)
+            if path is None:
+                continue
+            name = item.get("name", None) or _default_ckpt_name(str(path))
+        else:
+            continue
+        optical_entries.append({"name": str(name), "path": str(path), "index": str(idx)})
+
+    return {"electronic": electronic, "opticals": optical_entries}
+
+
 def ensure_analysis_dirs(outdir: str | Path) -> Tuple[Path, Path]:
     root = Path(outdir)
     fig_dir = root / "figures"
@@ -40,62 +93,108 @@ def infer_mode_from_cfg(cfg: Dict[str, Any]) -> str:
     return "optical" if cfg.get("optics", None) is not None else "electronic"
 
 
+def _safe_torch_load(path: Path, map_location: torch.device):
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(path, map_location=map_location)
+
+
 def load_model_bundle_from_checkpoint(
     checkpoint_path: str | Path,
     device: torch.device,
     mode: Optional[str] = None,
 ) -> Dict[str, Any]:
     ckpt_path = Path(checkpoint_path)
-    ckpt = torch.load(ckpt_path, map_location=device)
+    ckpt = _safe_torch_load(ckpt_path, map_location=device)
     cfg = ckpt.get("config", None)
-    if not isinstance(cfg, dict):
-        raise ValueError("Checkpoint {} missing `config` dict.".format(ckpt_path))
+    args = ckpt.get("args", None)
 
-    resolved_mode = str(mode) if mode is not None else infer_mode_from_cfg(cfg)
-    resolved_mode = resolved_mode.lower()
-    if resolved_mode not in ("electronic", "optical"):
-        raise ValueError("Unsupported mode: {}".format(resolved_mode))
+    # Path A: map-latent checkpoints (train_map_electronic/train_map_optical).
+    if isinstance(cfg, dict):
+        resolved_mode = str(mode) if mode is not None else infer_mode_from_cfg(cfg)
+        resolved_mode = resolved_mode.lower()
+        if resolved_mode not in ("electronic", "optical"):
+            raise ValueError("Unsupported mode: {}".format(resolved_mode))
 
-    data_cfg = cfg.get("data", {})
-    dataset = str(cfg.get("dataset", "mnist")).lower()
-    out_range = str(data_cfg.get("out_range", "zero_one"))
-    image_size = tuple(int(v) for v in data_cfg.get("image_size", [64, 64]))
+        data_cfg = cfg.get("data", {})
+        dataset = str(cfg.get("dataset", "mnist")).lower()
+        out_range = str(data_cfg.get("out_range", "zero_one"))
+        image_size = tuple(int(v) for v in data_cfg.get("image_size", [64, 64]))
 
-    dataset_info = {
-        "in_channels": 1 if dataset in ("mnist", "fashionmnist") else 3,
-        "image_size": image_size,
-    }
-    model = build_map_core_from_cfg(cfg, dataset_info).to(device)
-    if resolved_mode == "optical":
-        adapter = build_optical_adapter_from_cfg(cfg, model).to(device)
-    else:
-        adapter = IdentityAdapter().to(device)
+        dataset_info = {
+            "in_channels": 1 if dataset in ("mnist", "fashionmnist") else 3,
+            "image_size": image_size,
+        }
+        model = build_map_core_from_cfg(cfg, dataset_info).to(device)
+        if resolved_mode == "optical":
+            adapter = build_optical_adapter_from_cfg(cfg, model).to(device)
+        else:
+            adapter = IdentityAdapter().to(device)
 
-    model.load_state_dict(ckpt["model_state_dict"])
-    if "adapter_state_dict" in ckpt:
-        adapter.load_state_dict(ckpt["adapter_state_dict"])
-    model.eval()
-    adapter.eval()
+        model.load_state_dict(ckpt["model_state_dict"])
+        if "adapter_state_dict" in ckpt:
+            adapter.load_state_dict(ckpt["adapter_state_dict"])
+        model.eval()
+        adapter.eval()
 
-    latent_hw = getattr(model, "latent_hw", None)
-    latent_channels = getattr(model, "latent_channels", None)
-    if resolved_mode == "optical" and hasattr(adapter, "latent_h") and hasattr(adapter, "latent_w"):
-        latent_hw = (int(adapter.latent_h), int(adapter.latent_w))
-    if resolved_mode == "optical" and hasattr(adapter, "latent_channels"):
-        latent_channels = int(adapter.latent_channels)
+        latent_hw = getattr(model, "latent_hw", None)
+        latent_channels = getattr(model, "latent_channels", None)
+        if resolved_mode == "optical" and hasattr(adapter, "latent_h") and hasattr(adapter, "latent_w"):
+            latent_hw = (int(adapter.latent_h), int(adapter.latent_w))
+        if resolved_mode == "optical" and hasattr(adapter, "latent_channels"):
+            latent_channels = int(adapter.latent_channels)
 
-    return {
-        "mode": resolved_mode,
-        "checkpoint": str(ckpt_path),
-        "config": cfg,
-        "dataset": dataset,
-        "out_range": out_range,
-        "image_size": image_size,
-        "model": model,
-        "adapter": adapter,
-        "latent_hw": latent_hw,
-        "latent_channels": latent_channels,
-    }
+        return {
+            "family": "map",
+            "mode": resolved_mode,
+            "checkpoint": str(ckpt_path),
+            "config": cfg,
+            "dataset": dataset,
+            "out_range": out_range,
+            "image_size": image_size,
+            "model": model,
+            "adapter": adapter,
+            "latent_hw": latent_hw,
+            "latent_channels": latent_channels,
+        }
+
+    # Path B: vector ConvVAE checkpoints (train_vae.py).
+    if isinstance(args, dict) and "model_state_dict" in ckpt:
+        dataset = str(args.get("dataset", "mnist")).lower()
+        info = get_dataset_info(dataset)
+        out_range = str(args.get("out_range", "zero_one"))
+        image_size = tuple(int(v) for v in info["image_size"])
+        latent_dim = int(args.get("latent_dim", 100))
+        model_size = str(args.get("model_size", "tiny"))
+
+        model = ConvVAE(
+            in_channels=int(info["in_channels"]),
+            input_size=image_size,
+            latent_dim=latent_dim,
+            model_size=model_size,
+            out_range=out_range,
+        ).to(device)
+        model.load_state_dict(ckpt["model_state_dict"])
+        model.eval()
+
+        resolved_mode = "electronic"
+        return {
+            "family": "vector_vae",
+            "mode": resolved_mode,
+            "checkpoint": str(ckpt_path),
+            "config": None,
+            "args": args,
+            "dataset": dataset,
+            "out_range": out_range,
+            "image_size": image_size,
+            "model": model,
+            "adapter": None,
+            "latent_hw": (1, 1),
+            "latent_channels": latent_dim,
+        }
+
+    raise ValueError("Checkpoint {} is unsupported (missing both `config` and `args`).".format(ckpt_path))
 
 
 def build_test_loader(
@@ -127,6 +226,19 @@ def extract_decoder_latent(
     model = bundle["model"]
     adapter = bundle["adapter"]
     mode = bundle["mode"]
+    family = str(bundle.get("family", "map")).lower()
+
+    if family == "vector_vae":
+        mu, logvar = model.encode(x)
+        z = mu
+        info = {
+            "mu": mu,
+            "logvar": logvar,
+            "final_latent_map": z,
+        }
+        if return_info:
+            return z, info
+        return z, None
 
     if mode == "optical":
         z, info = adapter.encode_from_input(x, return_info=True, sample_posterior=False)
@@ -149,6 +261,9 @@ def extract_decoder_latent(
 
 
 def decode_from_latent(bundle: Dict[str, Any], z: torch.Tensor) -> torch.Tensor:
+    family = str(bundle.get("family", "map")).lower()
+    if family == "vector_vae":
+        return bundle["model"].decode(z)
     return bundle["model"].decode(z)
 
 

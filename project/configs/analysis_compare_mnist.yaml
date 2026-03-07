@@ -20,4 +20,10 @@ analysis:
 
 checkpoints:
   electronic: ./outputs/map_elec_mnist/checkpoints/best.pt
-  optical: ./outputs/map_opt_mnist/checkpoints/best.pt
+  opticals:
+    - name: opt_default
+      path: ./outputs/map_opt_mnist/checkpoints/best.pt
+    # - name: opt_iid_l20
+    #   path: ./outputs/map_opt_mnist_iid_l_20_NoPool/checkpoints/best.pt
+    # - name: opt_corr20_l5
+    #   path: ./outputs/map_opt_mnist_corr_20_l_5/checkpoints/best.pt

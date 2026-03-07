@@ -17,6 +17,7 @@ from utils.latent_compare import (
     flatten_latent,
     load_analysis_config,
     load_model_bundle_from_checkpoint,
+    resolve_checkpoint_groups,
     save_config_used,
 )
 from utils.seed import set_seed
@@ -186,15 +187,16 @@ def _analyze_one_mode(
     tsne_perplexity: float,
     save_pdf: bool,
 ) -> Dict[str, Any]:
+    safe_mode = str(mode_name).replace("/", "_").replace("\\", "_").replace(" ", "_").replace(":", "_")
     pca_pts = _pca_2d(latent, seed=seed)
     _scatter_plot(
         pca_pts,
         labels,
         title="{} Latent PCA".format(mode_name),
-        out_path=fig_dir / "latent_pca_{}.png".format(mode_name),
+        out_path=fig_dir / "latent_pca_{}.png".format(safe_mode),
         save_pdf=save_pdf,
     )
-    _save_embedding_csv(pca_pts, labels, metrics_dir / "embedding_pca_{}.csv".format(mode_name))
+    _save_embedding_csv(pca_pts, labels, metrics_dir / "embedding_pca_{}.csv".format(safe_mode))
 
     tsne_ok = False
     tsne_pts = np.empty((0, 2), dtype=np.float32)
@@ -205,10 +207,10 @@ def _analyze_one_mode(
                 tsne_pts,
                 labels,
                 title="{} Latent t-SNE".format(mode_name),
-                out_path=fig_dir / "latent_tsne_{}.png".format(mode_name),
+                out_path=fig_dir / "latent_tsne_{}.png".format(safe_mode),
                 save_pdf=save_pdf,
             )
-            _save_embedding_csv(tsne_pts, labels, metrics_dir / "embedding_tsne_{}.csv".format(mode_name))
+            _save_embedding_csv(tsne_pts, labels, metrics_dir / "embedding_tsne_{}.csv".format(safe_mode))
             tsne_ok = True
         except Exception:
             tsne_ok = False
@@ -219,7 +221,7 @@ def _analyze_one_mode(
         sample_means,
         sample_stds,
         title="{} Latent Distribution".format(mode_name),
-        out_path=fig_dir / "latent_hist_{}.png".format(mode_name),
+        out_path=fig_dir / "latent_hist_{}.png".format(safe_mode),
         save_pdf=save_pdf,
     )
 
@@ -228,7 +230,7 @@ def _analyze_one_mode(
         matrix=center_dist,
         labels=cls,
         title="{} Class Center Distance".format(mode_name),
-        out_path=fig_dir / "latent_center_dist_{}.png".format(mode_name),
+        out_path=fig_dir / "latent_center_dist_{}.png".format(safe_mode),
         save_pdf=save_pdf,
     )
     dist_rows = []
@@ -237,7 +239,7 @@ def _analyze_one_mode(
         for j, c2 in enumerate(cls):
             row["d_to_{}".format(int(c2))] = float(center_dist[i, j])
         dist_rows.append(row)
-    write_summary_csv(metrics_dir / "class_center_dist_{}.csv".format(mode_name), dist_rows)
+    write_summary_csv(metrics_dir / "class_center_dist_{}.csv".format(safe_mode), dist_rows)
 
     sil = None
     if SKLEARN_OK and len(np.unique(labels)) >= 2 and latent.shape[0] >= 10:
@@ -260,11 +262,11 @@ def _analyze_one_mode(
         "tsne_available": bool(tsne_ok),
     }
 
-    save_json(stats, metrics_dir / "latent_stats_{}.json".format(mode_name))
-    write_summary_csv(metrics_dir / "latent_stats_{}.csv".format(mode_name), [stats])
+    save_json(stats, metrics_dir / "latent_stats_{}.json".format(safe_mode))
+    write_summary_csv(metrics_dir / "latent_stats_{}.csv".format(safe_mode), [stats])
 
     np.savez_compressed(
-        metrics_dir / "latent_embeddings_{}.npz".format(mode_name),
+        metrics_dir / "latent_embeddings_{}.npz".format(safe_mode),
         latent=latent.astype(np.float32),
         labels=labels.astype(np.int64),
         pca=pca_pts.astype(np.float32),
@@ -281,11 +283,11 @@ def main() -> None:
     runtime = _resolve_runtime(cfg, args)
     set_seed(int(runtime["seed"]))
 
-    ckpt_cfg = cfg.get("checkpoints", {})
-    ckpt_e = ckpt_cfg.get("electronic", None)
-    ckpt_o = ckpt_cfg.get("optical", None)
-    if ckpt_e is None or ckpt_o is None:
-        raise ValueError("config.checkpoints.electronic and config.checkpoints.optical are required")
+    ckpt_grp = resolve_checkpoint_groups(cfg)
+    ckpt_e = ckpt_grp.get("electronic", None)
+    optical_entries = ckpt_grp.get("opticals", [])
+    if ckpt_e is None or len(optical_entries) == 0:
+        raise ValueError("Need checkpoints.electronic and at least one optical checkpoint (optical/opticals).")
 
     outdir = Path(runtime["outdir"])
     fig_dir, metrics_dir = ensure_analysis_dirs(outdir)
@@ -293,69 +295,92 @@ def main() -> None:
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     bundle_e = load_model_bundle_from_checkpoint(ckpt_e, device=device, mode="electronic")
-    bundle_o = load_model_bundle_from_checkpoint(ckpt_o, device=device, mode="optical")
+    optical_bundles = []
+    for item in optical_entries:
+        optical_bundles.append({"name": item["name"], "bundle": load_model_bundle_from_checkpoint(item["path"], device=device, mode="optical")})
 
     dataset = runtime["dataset"] or bundle_e["dataset"]
     if dataset is None:
         raise ValueError("Dataset is missing in args/config/checkpoint.")
-    if bundle_o["out_range"] != bundle_e["out_range"] or tuple(bundle_o["image_size"]) != tuple(bundle_e["image_size"]):
-        raise ValueError("Electronic/optical image setting mismatch; cannot compare directly.")
-
-    test_loader, _ = build_test_loader(
-        dataset=dataset,
-        data_root=args.data_root,
-        out_range=bundle_e["out_range"],
-        image_size=bundle_e["image_size"],
-        batch_size=int(runtime["batch_size"]),
-        num_workers=int(runtime["num_workers"]),
-        seed=int(runtime["seed"]),
-    )
+    entries: List[Dict[str, Any]] = [{"name": "electronic", "tag": "electronic", "bundle": bundle_e}]
+    for item in optical_bundles:
+        entries.append({"name": item["name"], "tag": "optical", "bundle": item["bundle"]})
 
     target_n = int(runtime["num_samples"])
-    lat_e: List[np.ndarray] = []
-    lat_o: List[np.ndarray] = []
-    lat_oi: List[np.ndarray] = []
-    labels_all: List[np.ndarray] = []
-    count = 0
+    loader_cache: Dict[str, Any] = {}
+    reprs: Dict[str, np.ndarray] = {}
+    repr_labels: Dict[str, np.ndarray] = {}
 
-    with torch.no_grad():
-        for x, y in test_loader:
-            if count >= target_n:
-                break
-            take = min(target_n - count, x.size(0))
-            if take <= 0:
-                break
-            xb = x[:take].to(device, non_blocking=True)
-            yb = y[:take]
+    for entry in entries:
+        bundle = entry["bundle"]
+        if (runtime["dataset"] or bundle["dataset"]) != dataset:
+            raise ValueError(
+                "Dataset mismatch for {}: expected {}, got {}".format(entry["name"], dataset, bundle["dataset"])
+            )
 
-            z_e, _ = extract_decoder_latent(bundle_e, xb, return_info=True)
-            z_o, info_o = extract_decoder_latent(bundle_o, xb, return_info=True)
+        cache_key = "{}|{}|{}x{}".format(
+            dataset,
+            bundle.get("out_range"),
+            int(bundle["image_size"][0]),
+            int(bundle["image_size"][1]),
+        )
+        if cache_key not in loader_cache:
+            test_loader, _ = build_test_loader(
+                dataset=dataset,
+                data_root=args.data_root,
+                out_range=bundle["out_range"],
+                image_size=bundle["image_size"],
+                batch_size=int(runtime["batch_size"]),
+                num_workers=int(runtime["num_workers"]),
+                seed=int(runtime["seed"]),
+            )
+            loader_cache[cache_key] = test_loader
+        else:
+            test_loader = loader_cache[cache_key]
 
-            lat_e.append(flatten_latent(z_e))
-            lat_o.append(flatten_latent(z_o))
-            if bool(runtime["include_optical_intensity"]) and isinstance(info_o, dict) and "latent_intensity_map" in info_o:
-                lat_oi.append(flatten_latent(info_o["latent_intensity_map"]))
-            labels_all.append(yb.numpy())
-            count += take
+        lat_main: List[np.ndarray] = []
+        lat_intensity: List[np.ndarray] = []
+        labels_all: List[np.ndarray] = []
+        count = 0
+        with torch.no_grad():
+            for x, y in test_loader:
+                if count >= target_n:
+                    break
+                take = min(target_n - count, x.size(0))
+                if take <= 0:
+                    break
+                xb = x[:take].to(device, non_blocking=True)
+                yb = y[:take]
 
-    if count == 0:
-        raise RuntimeError("No samples collected from test set.")
+                z, info = extract_decoder_latent(bundle, xb, return_info=True)
+                lat_main.append(flatten_latent(z))
+                if (
+                    entry["tag"] == "optical"
+                    and bool(runtime["include_optical_intensity"])
+                    and isinstance(info, dict)
+                    and "latent_intensity_map" in info
+                ):
+                    lat_intensity.append(flatten_latent(info["latent_intensity_map"]))
+                labels_all.append(yb.numpy())
+                count += take
 
-    labels_np = np.concatenate(labels_all, axis=0)
-    reprs: Dict[str, np.ndarray] = {
-        "electronic": np.concatenate(lat_e, axis=0),
-        "optical": np.concatenate(lat_o, axis=0),
-    }
-    if len(lat_oi) > 0:
-        reprs["optical_intensity"] = np.concatenate(lat_oi, axis=0)
+        if count == 0:
+            continue
+        labels_np = np.concatenate(labels_all, axis=0)
+        mode_name = "{}_{}".format(entry["tag"], entry["name"])
+        reprs[mode_name] = np.concatenate(lat_main, axis=0)
+        repr_labels[mode_name] = labels_np
+        if len(lat_intensity) > 0:
+            reprs["{}_intensity".format(mode_name)] = np.concatenate(lat_intensity, axis=0)
+            repr_labels["{}_intensity".format(mode_name)] = labels_np
 
     summary_rows = []
-    summary_json = {"dataset": dataset, "num_samples": int(count), "modes": {}}
+    summary_json = {"dataset": dataset, "num_samples": int(target_n), "modes": {}}
     for mode_name, latent_np in reprs.items():
         stats = _analyze_one_mode(
             mode_name=mode_name,
             latent=latent_np,
-            labels=labels_np,
+            labels=repr_labels[mode_name],
             fig_dir=fig_dir,
             metrics_dir=metrics_dir,
             seed=int(runtime["seed"]),
